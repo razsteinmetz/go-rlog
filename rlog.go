@@ -285,7 +285,7 @@ func New(cfg Config) (*Logger, error) {
 			w = os.Stderr
 		}
 		color := !c.JSON && useColor(w, c.Color)
-		handlers = append(handlers, newWriterHandler(w, c.JSON, color, c.Level, cfg.Format, cfg.Program))
+		handlers = append(handlers, newWriterHandler(w, c.JSON, color, c.Level, cfg.Format, program))
 	}
 
 	if c := cfg.File; c.Enabled {
@@ -294,7 +294,7 @@ func New(cfg Config) (*Logger, error) {
 			return fail(err)
 		}
 		l.fileClose = closeFn
-		handlers = append(handlers, newWriterHandler(w, c.JSON, false, c.Level, cfg.Format, cfg.Program))
+		handlers = append(handlers, newWriterHandler(w, c.JSON, false, c.Level, cfg.Format, program))
 	}
 
 	// notifierSpec is the part of each notification sink's config that New

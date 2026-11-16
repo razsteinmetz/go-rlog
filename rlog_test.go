@@ -291,6 +291,7 @@ func TestFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "app.log")
 	cfg := DefaultConfig()
 	cfg.Console.Enabled = false
+	cfg.Format.Program = false
 	cfg.File = FileSink{Enabled: true, Level: slog.LevelInfo, Path: path, Daily: true}
 	l, err := New(cfg)
 	if err != nil {
@@ -321,6 +322,7 @@ func TestRepeats(t *testing.T) {
 	var out syncBuffer
 	cfg := DefaultConfig()
 	cfg.Format.Time = TimeNone
+	cfg.Format.Program = false
 	cfg.Console.Writer = &out
 	cfg.Repeats = RepeatConfig{Enabled: true, Window: Duration(200 * time.Millisecond)}
 	l, err := New(cfg)
@@ -691,5 +693,19 @@ func TestValidation(t *testing.T) {
 	cfg.Telegram.Enabled = true
 	if _, err := New(cfg); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+// TestProgramDefaultsToExecutable checks that an empty Config.Program falls
+// back to the executable's name in console lines, as documented.
+func TestProgramDefaultsToExecutable(t *testing.T) {
+	log, buf, _ := newBuf(t, func(c *Config) {
+		c.Program = ""
+		c.Format.Time = TimeNone
+	})
+	log.Info("x")
+	exe := strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+	if want := "INFO  " + exe + ": x\n"; buf.String() != want {
+		t.Fatalf("got %q want %q", buf.String(), want)
 	}
 }
