@@ -2,7 +2,6 @@ package rlog
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -12,17 +11,17 @@ import (
 	"strings"
 )
 
-// TelegramSink sends records and special messages to a chat through the
+// TelegramSink sends log records and notifications to a chat through the
 // Telegram Bot API.
 type TelegramSink struct {
 	// Enabled turns the sink on.
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	// Level is the minimum level of log records sent. Special messages
-	// (Notify, Send) are sent regardless.
+	// Level is the minimum level of log records sent. Notifications ignore
+	// it.
 	Level slog.Level `json:"level" yaml:"level"`
-	// MessagesOnly sends only special messages, no log records.
+	// MessagesOnly sends only notifications here, no log records.
 	MessagesOnly bool `json:"messages_only" yaml:"messages_only"`
-	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Notifications controls whether notifications (Notify, NotifyRaw,
 	// Send) are sent here. Nil (not set) means yes.
 	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Token is the bot token from @BotFather.
@@ -58,24 +57,21 @@ func (c TelegramSink) sender() (sender, error) {
 }
 
 // text builds the message: the heading on the first line (bold for
-// formatted HTML messages), then the body.
-func (s *telegramSender) text(n notification) string {
-	h := n.heading()
-	if n.HTML && !n.Raw && h != "" {
+// formatted HTML notifications), then the body.
+func (s *telegramSender) text(d delivery) string {
+	h := d.heading()
+	if d.HTML && !d.Raw && h != "" {
 		h = "<b>" + html.EscapeString(h) + "</b>"
 	}
-	switch {
-	case h == "":
-		return n.Text
-	case n.Text == "":
-		return h
+	if h == "" || d.Text == "" {
+		return h + d.Text
 	}
-	return h + "\n" + n.Text
+	return h + "\n" + d.Text
 }
 
 // send posts one message with sendMessage.
-func (s *telegramSender) send(ctx context.Context, n notification) error {
-	text := s.text(n)
+func (s *telegramSender) send(ctx context.Context, d delivery) error {
+	text := s.text(d)
 	if text == "" {
 		return errEmptyNotification
 	}
@@ -84,36 +80,19 @@ func (s *telegramSender) send(ctx context.Context, n notification) error {
 		"text":                     {truncate(text, telegramMaxText)},
 		"disable_web_page_preview": {"true"},
 	}
-	if n.HTML {
+	if d.HTML {
 		form.Set("parse_mode", "HTML")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return redactURLError(err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("send: %w", redactURLError(err))
-	}
-	defer resp.Body.Close()
 	var out struct {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	if resp.StatusCode != http.StatusOK || !out.OK {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, out.Description)
+	status, err := postForm(ctx, s.endpoint, form, &out)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK || !out.OK {
+		return fmt.Errorf("HTTP %d: %s", status, out.Description)
 	}
 	return nil
-}
-
-// redactURLError strips the request URL, which contains the bot token,
-// from a *url.Error so the token never reaches the error output.
-func redactURLError(err error) error {
-	var uerr *url.Error
-	if errors.As(err, &uerr) {
-		return uerr.Err
-	}
-	return err
 }

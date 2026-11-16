@@ -6,13 +6,18 @@
 # ${NAME} is replaced by the environment variable NAME. The example program
 # loads the secrets from .var (see .var.example) into the environment before
 # reading this file, so no secrets live in this file.
+#
+# Every sink has two switches for what it receives:
+#   level          the lowest level of log records it takes
+#   notifications  whether it takes notifications (Notify, NotifyRaw, Send);
+#                  leaving it out means true
 
 program: example
 
 format:
-  time: full          # full | datetime | short | time | timems | date | rfc3339 | rfc3339nano | iso8601 | unix | unixms | none | a Go layout
+  time: full            # full | datetime | short | time | timems | date | rfc3339 | rfc3339nano | iso8601 | unix | unixms | none | a Go layout
   utc: false
-  source: short       # "" (off) | short | full
+  source: short         # "" (off) | short | full
   level: true
   component: true
   program: true
@@ -21,33 +26,30 @@ console:
   enabled: true
   level: debug
   json: false
-  notifications: true   # write Notify/Send messages here as NOTE lines (default true)
-  color: auto         # never | auto | always
+  color: auto           # never | auto | always
+  notifications: true   # shown as NOTE lines
 
 file:
   enabled: true
   level: info
-  json: true          # the file gets JSON lines, the console gets text
-  notifications: true   # default true
+  json: true            # the file gets JSON lines, the console gets text
+  notifications: true
   path: logs/example.log
   max_size_mb: 100
   daily: true
   max_backups: 7
   compress: true
 
-repeats:              # identical records within the window are grouped
+repeats:                # identical records or notifications within the window are grouped
   enabled: true
   window: 2s
 
-queue_size: 100
-notify_timeout: 15s
-close_timeout: 10s
+queue_size: 100         # per service; when full, new items are dropped
+notify_timeout: 15s     # limit on one send to a service
+close_timeout: 10s      # how long Close waits for the queues to empty
 
-# Notification sinks. A sink whose secrets are missing from .var is turned
-# off by the example program, so you can test one service at a time.
-#
-# On every sink, `notifications` decides whether special messages
-# (Notify, NotifyRaw, Send) go there. Leaving it out means true.
+# The services. One whose secrets are missing from .var is turned off by
+# the example program, so you can test one service at a time.
 
 telegram:
   enabled: true
@@ -69,8 +71,8 @@ email:
   level: error
   notifications: true
   host: ${SMTP_HOST}
-  port: 587           # 587 starttls, 465 tls, 25 none
-  security: starttls  # starttls | tls | none
+  port: 587             # 587 starttls, 465 tls, 25 none
+  security: starttls    # starttls | tls | none
   username: ${SMTP_USERNAME}
   password: ${SMTP_PASSWORD}
   from: ${EMAIL_FROM}

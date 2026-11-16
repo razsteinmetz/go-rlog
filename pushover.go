@@ -2,7 +2,6 @@ package rlog
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,16 +11,16 @@ import (
 	"strings"
 )
 
-// PushoverSink sends records and special messages through the Pushover API.
+// PushoverSink sends log records and notifications through the Pushover API.
 type PushoverSink struct {
 	// Enabled turns the sink on.
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	// Level is the minimum level of log records sent. Special messages
-	// (Notify, Send) are sent regardless.
+	// Level is the minimum level of log records sent. Notifications ignore
+	// it.
 	Level slog.Level `json:"level" yaml:"level"`
-	// MessagesOnly sends only special messages, no log records.
+	// MessagesOnly sends only notifications here, no log records.
 	MessagesOnly bool `json:"messages_only" yaml:"messages_only"`
-	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Notifications controls whether notifications (Notify, NotifyRaw,
 	// Send) are sent here. Nil (not set) means yes.
 	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Token is the application API token.
@@ -33,7 +32,7 @@ type PushoverSink struct {
 	// Priorities maps a level to a Pushover priority (-2..2). A record uses
 	// the entry for the highest level at or below its own. Nil means
 	// DEBUG:-2 INFO:-1 WARN:0 ERROR:1. Priority 2 (emergency) repeats every
-	// 60s for an hour until acknowledged. Special messages use
+	// 60s for an hour until acknowledged. Notifications use
 	// Message.Priority instead.
 	Priorities map[slog.Level]int `json:"priorities" yaml:"priorities"`
 	// APIURL overrides https://api.pushover.net/1/messages.json.
@@ -91,12 +90,12 @@ func (s *pushoverSender) priority(level slog.Level) int {
 }
 
 // send posts one message to the Pushover API.
-func (s *pushoverSender) send(ctx context.Context, n notification) error {
-	prio := s.priority(n.Level)
-	if n.Message {
-		prio = min(max(n.Priority, -2), 2)
+func (s *pushoverSender) send(ctx context.Context, d delivery) error {
+	prio := s.priority(d.Level)
+	if d.note {
+		prio = min(max(d.Priority, -2), 2)
 	}
-	title, msg := n.heading(), n.Text
+	title, msg := d.heading(), d.Text
 	if msg == "" { // Pushover requires a message
 		title, msg = "", title
 	}
@@ -112,11 +111,11 @@ func (s *pushoverSender) send(ctx context.Context, n notification) error {
 	if title != "" {
 		form.Set("title", truncate(title, pushoverMaxTitle))
 	}
-	if n.HTML {
+	if d.HTML {
 		form.Set("html", "1")
 	}
-	if !n.Time.IsZero() {
-		form.Set("timestamp", strconv.FormatInt(n.Time.Unix(), 10))
+	if !d.Time.IsZero() {
+		form.Set("timestamp", strconv.FormatInt(d.Time.Unix(), 10))
 	}
 	if s.cfg.Device != "" {
 		form.Set("device", s.cfg.Device)
@@ -125,23 +124,16 @@ func (s *pushoverSender) send(ctx context.Context, n notification) error {
 		form.Set("retry", "60")
 		form.Set("expire", "3600")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.APIURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("send: %w", err)
-	}
-	defer resp.Body.Close()
 	var out struct {
 		Status int      `json:"status"`
 		Errors []string `json:"errors"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	if resp.StatusCode != http.StatusOK || out.Status != 1 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.Join(out.Errors, "; "))
+	status, err := postForm(ctx, s.cfg.APIURL, form, &out)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK || out.Status != 1 {
+		return fmt.Errorf("HTTP %d: %s", status, strings.Join(out.Errors, "; "))
 	}
 	return nil
 }

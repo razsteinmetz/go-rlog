@@ -24,16 +24,16 @@ const (
 	SecurityNone     = "none"     // no encryption; default port 25
 )
 
-// EmailSink sends each record or special message as an email over SMTP.
+// EmailSink sends each log record or notification as an email over SMTP.
 type EmailSink struct {
 	// Enabled turns the sink on.
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	// Level is the minimum level of log records sent. Special messages
-	// (Notify, Send) are sent regardless.
+	// Level is the minimum level of log records sent. Notifications ignore
+	// it.
 	Level slog.Level `json:"level" yaml:"level"`
-	// MessagesOnly sends only special messages, no log records.
+	// MessagesOnly sends only notifications here, no log records.
 	MessagesOnly bool `json:"messages_only" yaml:"messages_only"`
-	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Notifications controls whether notifications (Notify, NotifyRaw,
 	// Send) are sent here. Nil (not set) means yes.
 	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Host is the SMTP server name; it is also checked against the TLS
@@ -93,7 +93,7 @@ func (c EmailSink) sender() (sender, error) {
 // send delivers one email. The whole SMTP conversation is bounded by ctx:
 // its deadline is set on the connection, and canceling it (when Close
 // gives up) aborts the connection.
-func (s *emailSender) send(ctx context.Context, n notification) error {
+func (s *emailSender) send(ctx context.Context, d delivery) error {
 	c := s.cfg
 	addr := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	tlsCfg := &tls.Config{ServerName: c.Host}
@@ -146,7 +146,7 @@ func (s *emailSender) send(ctx context.Context, n notification) error {
 	if err != nil {
 		return fmt.Errorf("data: %w", err)
 	}
-	if _, err := w.Write(s.message(n)); err != nil {
+	if _, err := w.Write(s.message(d)); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
 	if err := w.Close(); err != nil {
@@ -156,17 +156,17 @@ func (s *emailSender) send(ctx context.Context, n notification) error {
 }
 
 // message builds the RFC 5322 message. The SMTP data writer converts "\n"
-// to CRLF and dot-stuffs lines. Records and formatted messages end with a
-// footer giving the time and program (and the level, for records); raw
-// messages do not.
-func (s *emailSender) message(n notification) []byte {
-	subject := truncate(n.subject(), 150)
-	t := n.Time
+// to CRLF and dot-stuffs lines. Records and formatted notifications end
+// with a footer giving the time and program (and the level, for records);
+// raw notifications do not.
+func (s *emailSender) message(d delivery) []byte {
+	subject := truncate(d.subject(), 150)
+	t := d.Time
 	if t.IsZero() {
 		t = time.Now()
 	}
 	contentType := "text/plain"
-	if n.HTML {
+	if d.HTML {
 		contentType = "text/html"
 	}
 	var b bytes.Buffer
@@ -177,13 +177,13 @@ func (s *emailSender) message(n notification) []byte {
 	b.WriteString("MIME-Version: 1.0\n")
 	fmt.Fprintf(&b, "Content-Type: %s; charset=utf-8\n", contentType)
 	b.WriteString("Content-Transfer-Encoding: 8bit\n\n")
-	b.WriteString(n.Text)
-	if !n.Raw {
-		footer := t.Format(time.RFC3339) + "  " + n.Program
-		if !n.Message {
-			footer += "  " + n.Level.String()
+	b.WriteString(d.Text)
+	if !d.Raw {
+		footer := t.Format(time.RFC3339) + "  " + d.Program
+		if !d.note {
+			footer += "  " + d.Level.String()
 		}
-		if n.HTML {
+		if d.HTML {
 			fmt.Fprintf(&b, "\n<hr><small>%s</small>\n", html.EscapeString(footer))
 		} else {
 			fmt.Fprintf(&b, "\n\n%s\n", footer)

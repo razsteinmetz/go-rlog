@@ -7,14 +7,15 @@ import (
 	"time"
 )
 
-// repeatState tracks recently seen records (or messages) by key and decides
-// which to pass through. See RepeatConfig for the behavior.
+// repeatState tracks recently seen records and notifications by key and
+// decides which to pass through. See RepeatConfig for the behavior.
 type repeatState struct {
 	window time.Duration
 
-	mu      sync.Mutex
-	closed  bool                    // after close everything passes through
-	entries map[string]*repeatEntry // open grouping windows by key
+	mu       sync.Mutex
+	closed   bool                    // after close everything passes through
+	entries  map[string]*repeatEntry // open grouping windows by key
+	flushing sync.WaitGroup          // summaries being emitted by expire
 }
 
 // repeatEntry is one open grouping window.
@@ -31,7 +32,8 @@ func newRepeatState(window time.Duration) *repeatState {
 
 // allow reports whether an occurrence of key should be emitted now. When it
 // returns false the occurrence was counted, and flush (which replaces any
-// earlier one for key) will be called with the count when the window ends.
+// earlier one for key) will be called once, with the count, when the window
+// ends.
 func (s *repeatState) allow(key string, flush func(count int)) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,7 +55,7 @@ func (s *repeatState) allow(key string, flush func(count int)) bool {
 // opens another window for key; otherwise it forgets key.
 func (s *repeatState) expire(key string, e *repeatEntry) {
 	s.mu.Lock()
-	if s.closed || s.entries[key] != e {
+	if s.closed {
 		s.mu.Unlock()
 		return
 	}
@@ -65,12 +67,15 @@ func (s *repeatState) expire(key string, e *repeatEntry) {
 	}
 	e.count, e.flush = 0, nil
 	e.timer.Reset(s.window)
+	s.flushing.Add(1) // so that close waits for this summary
 	s.mu.Unlock()
+	defer s.flushing.Done()
 	flush(count) // outside the lock: it calls into the sinks
 }
 
-// close stops all timers, emits every pending summary and makes allow pass
-// everything from now on.
+// close emits every pending summary and makes allow pass everything from
+// now on. It returns once all summaries, including any that expire was
+// emitting at the time, have been handed to the sinks.
 func (s *repeatState) close() {
 	s.mu.Lock()
 	if s.closed {
@@ -78,21 +83,16 @@ func (s *repeatState) close() {
 		return
 	}
 	s.closed = true
-	type pending struct {
-		flush func(int)
-		count int
-	}
-	var todo []pending
-	for _, e := range s.entries {
-		e.timer.Stop()
-		if e.count > 0 {
-			todo = append(todo, pending{e.flush, e.count})
-		}
-	}
+	entries := s.entries // nothing else touches them once closed is set
 	s.entries = nil
 	s.mu.Unlock()
-	for _, p := range todo {
-		p.flush(p.count)
+
+	s.flushing.Wait()
+	for _, e := range entries {
+		e.timer.Stop()
+		if e.count > 0 {
+			e.flush(e.count)
+		}
 	}
 }
 
@@ -137,7 +137,8 @@ func (h *repeatHandler) WithGroup(name string) slog.Handler {
 
 // Handle passes r on unless it repeats a record seen within the window.
 // The key is the level, message and all attributes; time and source are
-// ignored.
+// ignored. The summary is the last repeat, stamped with the time it is
+// written (so the log stays in time order) and carrying the repeat count.
 func (h *repeatHandler) Handle(ctx context.Context, r slog.Record) error {
 	key := make([]byte, 0, 64+len(r.Message)+len(h.prefix))
 	key = append(key, r.Level.String()...)
@@ -150,12 +151,11 @@ func (h *repeatHandler) Handle(ctx context.Context, r slog.Record) error {
 		return true
 	})
 
-	saved := r.Clone()
-	next := h.next
+	last := r.Clone() // kept beyond this call if r turns out to be a repeat
 	pass := h.st.allow(string(key), func(count int) {
-		s := saved.Clone()
-		s.AddAttrs(slog.Int(RepeatedKey, count))
-		_ = next.Handle(context.Background(), s)
+		last.Time = time.Now()
+		last.AddAttrs(slog.Int(RepeatedKey, count))
+		_ = h.next.Handle(context.Background(), last)
 	})
 	if !pass {
 		return nil

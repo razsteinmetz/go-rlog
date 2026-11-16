@@ -18,18 +18,20 @@ func openFile(c FileSink, utc bool) (io.Writer, func() error, error) {
 	if c.Path == "" {
 		return nil, nil, errors.New("rlog: file sink enabled but path is empty")
 	}
-	if dir := filepath.Dir(c.Path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, nil, fmt.Errorf("rlog: create log dir: %w", err)
-		}
+	if err := os.MkdirAll(filepath.Dir(c.Path), 0o755); err != nil {
+		return nil, nil, fmt.Errorf("rlog: create log dir: %w", err)
 	}
-	maxSize := c.MaxSizeMB
-	if maxSize <= 0 {
-		maxSize = defaultMaxSizeMB
+	// lumberjack opens the file on the first write, and slog discards write
+	// errors, so open it once here: a bad path or missing permission is
+	// then reported at startup instead of silently losing the log.
+	f, err := os.OpenFile(c.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rlog: open log file: %w", err)
 	}
+	f.Close()
 	lj := &lumberjack.Logger{
 		Filename:   c.Path,
-		MaxSize:    maxSize,
+		MaxSize:    positive(c.MaxSizeMB, defaultMaxSizeMB),
 		MaxBackups: c.MaxBackups,
 		MaxAge:     c.MaxAgeDays,
 		Compress:   c.Compress,

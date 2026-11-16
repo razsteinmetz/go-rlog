@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -317,15 +318,16 @@ func TestUntilMidnight(t *testing.T) {
 }
 
 // TestRepeats checks that identical records within the window collapse
-// into the first record plus one summary, and that different attributes
-// are not grouped.
+// into the first record plus one summary, that different attributes are
+// not grouped, and that a summary is stamped with the time it is written.
 func TestRepeats(t *testing.T) {
+	const window = 400 * time.Millisecond
 	var out syncBuffer
 	cfg := DefaultConfig()
-	cfg.Format.Time = TimeNone
+	cfg.Format.Time = TimeUnixMilli
 	cfg.Format.Program = false
 	cfg.Console.Writer = &out
-	cfg.Repeats = RepeatConfig{Enabled: true, Window: Duration(200 * time.Millisecond)}
+	cfg.Repeats = RepeatConfig{Enabled: true, Window: Duration(window)}
 	l, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -335,7 +337,7 @@ func TestRepeats(t *testing.T) {
 		log.Warn("disk full", "dev", "sda")
 	}
 	log.Warn("disk full", "dev", "sdb")
-	time.Sleep(300 * time.Millisecond)  // first window ends, summary emitted
+	time.Sleep(window * 3 / 2)          // first window ends, summary emitted
 	log.Warn("disk full", "dev", "sda") // still within the follow-up window
 	l.Close()                           // flushes the second summary
 
@@ -349,10 +351,56 @@ func TestRepeats(t *testing.T) {
 	if len(lines) != len(want) {
 		t.Fatalf("got %q", lines)
 	}
+	stamps := make([]int64, len(lines))
 	for i := range want {
-		if !strings.HasSuffix(lines[i], want[i]) {
-			t.Fatalf("line %d: got %q want suffix %q", i, lines[i], want[i])
+		stamp, rest, _ := strings.Cut(lines[i], " ")
+		if rest != want[i] {
+			t.Fatalf("line %d: got %q want %q", i, rest, want[i])
 		}
+		stamps[i], _ = strconv.ParseInt(stamp, 10, 64)
+	}
+	// Stamped when written, not when the last repeat happened, so the log
+	// stays in time order.
+	if d := stamps[2] - stamps[0]; d < window.Milliseconds()-50 {
+		t.Fatalf("summary stamped %dms after the first record, want about %v", d, window)
+	}
+}
+
+// TestPanickingErrorValue checks that an error value whose Error method
+// panics (here on a nil pointer) is logged rather than crashing the caller.
+func TestPanickingErrorValue(t *testing.T) {
+	log, buf, _ := newBuf(t, func(c *Config) { c.Format = Format{Time: TimeNone} })
+	var perr *os.PathError // (*PathError).Error dereferences its receiver
+	log.Error("x", "err", perr)
+	if got := buf.String(); got != "x err=<nil>\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestJSONKeepsUserLevelAttr checks that hiding the built-in level does not
+// drop a caller's own attribute that happens to be called "level".
+func TestJSONKeepsUserLevelAttr(t *testing.T) {
+	log, buf, _ := newBuf(t, func(c *Config) {
+		c.Console.JSON = true
+		c.Format.Level = false
+	})
+	log.Info("x", "level", 3)
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatal(err, buf.String())
+	}
+	if m["level"] != 3.0 {
+		t.Fatalf("got %v", m)
+	}
+}
+
+// TestFileOpenError checks that New reports a log path that cannot be
+// opened, instead of failing silently at the first write.
+func TestFileOpenError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.File = FileSink{Enabled: true, Path: t.TempDir()} // a directory, not a file
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected error")
 	}
 }
 
@@ -514,6 +562,7 @@ func TestUnreachableNotifierThrottled(t *testing.T) {
 	var errBuf syncBuffer
 	log, _, l := newBuf(t, func(c *Config) {
 		c.ErrorWriter = &errBuf
+		c.CloseTimeout = Duration(30 * time.Second) // refused connections can be slow on Windows
 		c.Telegram = TelegramSink{Enabled: true, Level: slog.LevelError, Token: "SECRET", ChatID: "1", APIURL: dead}
 	})
 	for range 5 {
@@ -521,7 +570,7 @@ func TestUnreachableNotifierThrottled(t *testing.T) {
 	}
 	l.Close()
 	out := errBuf.String()
-	if strings.Count(out, "\n") != 2 || !strings.Contains(out, "4 further notifier errors suppressed") {
+	if strings.Count(out, "\n") != 2 || !strings.Contains(out, "rlog: telegram: 4 further errors suppressed") {
 		t.Fatalf("got %q", out)
 	}
 	if strings.Contains(out, "SECRET") {
@@ -603,8 +652,8 @@ func TestEmailMessageFormats(t *testing.T) {
 	s := &emailSender{cfg: EmailSink{From: "a@example.com", To: []string{"b@example.com"}}}
 	l := &Logger{program: "prog"}
 	build := func(m Message) string {
-		ch := make(chan notification, 1)
-		l.outputs = []*output{{target: ToEmail, deliver: func(n notification, _ string) { ch <- n }}}
+		ch := make(chan delivery, 1)
+		l.outputs = []output{{target: ToEmail, deliver: func(d delivery) { ch <- d }}}
 		l.Send(m)
 		return string(s.message(<-ch))
 	}

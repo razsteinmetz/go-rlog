@@ -18,15 +18,17 @@
 // The configuration can also be read from a YAML or JSON file with
 // LoadConfig, or in one step with InitFile.
 //
-// Each sink has its own Enabled switch and minimum Level. Besides log
-// records, level-less "special" messages can be sent with Notify, NotifyRaw
-// and Send: to every sink by default (console and file show them as NOTE
-// lines), or to the sinks named in Message.To. A sink's Notifications
-// setting decides whether it accepts them.
+// rlog carries two kinds of output. Log records come from slog calls; each
+// sink has its own Enabled switch and minimum Level. Notifications are
+// level-less messages sent with Notify, NotifyRaw and Send: to every sink
+// by default (console and file show them as NOTE lines), or to the sinks
+// named in Message.To. A sink's Notifications setting decides whether it
+// accepts them.
 //
-// Notifications are queued and delivered on background goroutines, so a slow
-// or unreachable notification service never blocks the caller, and Close
-// waits at most Config.CloseTimeout for queued notifications to go out.
+// Whatever goes to the services (Telegram, Pushover, email) is queued and
+// sent on background goroutines, so a slow or unreachable service never
+// blocks the caller, and Close waits at most Config.CloseTimeout for the
+// queues to empty.
 package rlog
 
 import (
@@ -62,8 +64,8 @@ const (
 	SourceFull  SourceMode = "full"  // /full/path/to/file.go:42
 )
 
-// Format controls how console and file records look.
-// Notifications always use their own short format (see Telegram, Pushover, Email).
+// Format controls how console and file records look. The services always
+// use their own short format (see Telegram, Pushover, Email).
 type Format struct {
 	// Time is a preset name (see TimeFull and the other Time constants:
 	// "full", "datetime", "short", "time", "timems", "date", "rfc3339",
@@ -94,7 +96,7 @@ type ConsoleSink struct {
 	Level slog.Level `json:"level" yaml:"level"`
 	// JSON writes one JSON object per record instead of a text line.
 	JSON bool `json:"json" yaml:"json"`
-	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Notifications controls whether notifications (Notify, NotifyRaw,
 	// Send) are written here, as NOTE lines. Nil (not set) means yes.
 	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Color colors text output with ANSI escapes: "never" (or empty),
@@ -113,7 +115,7 @@ type FileSink struct {
 	Level slog.Level `json:"level" yaml:"level"`
 	// JSON writes one JSON object per record instead of a text line.
 	JSON bool `json:"json" yaml:"json"`
-	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Notifications controls whether notifications (Notify, NotifyRaw,
 	// Send) are written here, as NOTE lines. Nil (not set) means yes.
 	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Path is the log file. Missing directories are created.
@@ -122,6 +124,7 @@ type FileSink struct {
 	// size rotation cannot be turned off.
 	MaxSizeMB int `json:"max_size_mb" yaml:"max_size_mb"`
 	// Daily also rotates at midnight (local, or UTC when Format.UTC is set).
+	// The rotation happens only while the program is running at midnight.
 	Daily bool `json:"daily" yaml:"daily"`
 	// MaxBackups is how many rotated files to keep; 0 keeps all.
 	MaxBackups int `json:"max_backups" yaml:"max_backups"`
@@ -137,10 +140,10 @@ type FileSink struct {
 // Identical records (same level, message, component and attributes; the
 // time and source location are ignored) that follow within Window are
 // counted instead of logged. When the window ends, the last of them is
-// logged once with a RepeatedKey attribute holding the count, and a new
-// window starts; a window with no repeats ends the grouping. A steady flood
-// of one message therefore produces one line per Window. Special messages
-// sent with Notify, NotifyRaw or Send are grouped the same way.
+// logged once, stamped with the current time and with a RepeatedKey
+// attribute holding the count, and a new window starts; a window with no
+// repeats ends the grouping. A steady flood of one message therefore
+// produces one line per Window. Notifications are grouped the same way.
 type RepeatConfig struct {
 	// Enabled turns grouping on.
 	Enabled bool `json:"enabled" yaml:"enabled"`
@@ -153,8 +156,8 @@ type RepeatConfig struct {
 // DefaultConfig; when decoding into a Config yourself, decode on top of
 // DefaultConfig() so the boolean defaults are kept.
 type Config struct {
-	// Program names the program in log lines (Format.Program) and in
-	// notification titles. Empty means the executable's name.
+	// Program names the program in log lines (Format.Program) and in the
+	// titles sent to the services. Empty means the executable's name.
 	Program string `json:"program" yaml:"program"`
 	// Format controls the console and file output.
 	Format Format `json:"format" yaml:"format"`
@@ -162,29 +165,30 @@ type Config struct {
 	Console ConsoleSink `json:"console" yaml:"console"`
 	// File is the rotating file sink.
 	File FileSink `json:"file" yaml:"file"`
-	// Telegram is the Telegram notification sink.
+	// Telegram is the Telegram sink.
 	Telegram TelegramSink `json:"telegram" yaml:"telegram"`
-	// Pushover is the Pushover notification sink.
+	// Pushover is the Pushover sink.
 	Pushover PushoverSink `json:"pushover" yaml:"pushover"`
-	// Email is the SMTP notification sink.
+	// Email is the SMTP sink.
 	Email EmailSink `json:"email" yaml:"email"`
 	// Repeats groups identical records sent close together.
 	Repeats RepeatConfig `json:"repeats" yaml:"repeats"`
 
-	// QueueSize is how many notifications each notifier buffers before it
-	// drops new ones. 0 means 100.
+	// QueueSize is how many records and notifications each service
+	// (Telegram, Pushover, email) buffers before it drops new ones. 0 means
+	// 100.
 	QueueSize int `json:"queue_size" yaml:"queue_size"`
-	// NotifyTimeout bounds one delivery attempt (connect, send, reply) of a
-	// notification. A notification that fails is reported to ErrorWriter
-	// and dropped; it is not retried. 0 means 15 seconds.
+	// NotifyTimeout bounds one delivery attempt (connect, send, reply) to a
+	// service. A delivery that fails is reported to ErrorWriter and
+	// dropped; it is not retried. 0 means 15 seconds.
 	NotifyTimeout Duration `json:"notify_timeout" yaml:"notify_timeout"`
-	// CloseTimeout is the longest Close waits, in total, for queued
-	// notifications to be delivered. Whatever is still queued afterwards is
-	// dropped. 0 means 5 seconds.
+	// CloseTimeout is the longest Close waits, in total, for the services'
+	// queues to empty. Whatever is still queued afterwards is dropped. 0
+	// means 5 seconds.
 	CloseTimeout Duration `json:"close_timeout" yaml:"close_timeout"`
 	// ErrorWriter receives rlog's own errors, such as a failed Telegram
 	// request. It is never routed through slog, and repeated errors from one
-	// notifier are throttled to one line per minute. Default os.Stderr.
+	// service are throttled to one line per minute. Default os.Stderr.
 	ErrorWriter io.Writer `json:"-" yaml:"-"`
 }
 
@@ -197,11 +201,19 @@ const (
 	defaultMaxSizeMB     = 100
 )
 
+// positive returns v when it is greater than zero, and def otherwise.
+func positive[T int | time.Duration](v, def T) T {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
 // DefaultConfig returns a colored console logger at Info with level,
 // component and program shown; a file sink (off until Enabled and Path are
 // set) at Info that rotates daily and at 100 MB, keeps 7 compressed
-// backups; notification sinks off with level Error; and repeat grouping off
-// with a one-minute window.
+// backups; the services off with level Error; and repeat grouping off with
+// a one-minute window.
 func DefaultConfig() Config {
 	return Config{
 		Format: Format{
@@ -228,21 +240,21 @@ func DefaultConfig() Config {
 	}
 }
 
-// Logger owns the handler and the resources behind it (open files,
-// notification queues, repeat timers). Close it before the program exits so
-// queued notifications are sent and grouped repeats are flushed.
+// Logger owns the handler and the resources behind it (the open file, the
+// services' queues, repeat timers). Close it before the program exits so
+// queued deliveries are sent and grouped repeats are flushed.
 //
-// All methods are safe for concurrent use, and all methods are no-ops on a
-// nil *Logger, so package-level helpers such as Notify work (doing nothing)
-// before Init is called.
+// All methods are safe for concurrent use. Close, Send, Notify and
+// NotifyRaw do nothing on a nil *Logger, so the package-level helpers are
+// safe to call before Init.
 type Logger struct {
 	handler      slog.Handler  // fan-out (optionally wrapped by repeat grouping)
 	logger       *slog.Logger  // slog.New(handler)
 	program      string        // resolved Config.Program
-	outputs      []*output     // sinks that accept special messages, for Send
-	dispatchers  []*dispatcher // notification queues, drained by Close
+	outputs      []output      // sinks that accept notifications, for Send
+	dispatchers  []*dispatcher // the services' queues, drained by Close
 	repeats      *repeatState  // nil when Config.Repeats is off
-	closeTimeout time.Duration // total wait for queued notifications in Close
+	closeTimeout time.Duration // total wait for the queues in Close
 	fileClose    func() error  // closes the log file; nil without a file sink
 	closeOnce    sync.Once     // makes Close idempotent
 	closeErr     error         // result of the first Close
@@ -256,33 +268,34 @@ var std atomic.Pointer[Logger]
 //
 // New fails if a sink's configuration is invalid (for example a Telegram
 // sink without a token) or the log file cannot be opened. It never contacts
-// the notification services, so a bad API key or a missing network only
-// shows up later, as errors written to Config.ErrorWriter.
+// the services, so a bad API key or a missing network only shows up later,
+// as errors written to Config.ErrorWriter.
 func New(cfg Config) (*Logger, error) {
-	if cfg.ErrorWriter == nil {
-		cfg.ErrorWriter = os.Stderr
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
-	if cfg.QueueSize <= 0 {
-		cfg.QueueSize = defaultQueueSize
-	}
-	notifyTimeout := time.Duration(cfg.NotifyTimeout)
-	if notifyTimeout <= 0 {
-		notifyTimeout = defaultNotifyTimeout
-	}
-	closeTimeout := time.Duration(cfg.CloseTimeout)
-	if closeTimeout <= 0 {
-		closeTimeout = defaultCloseTimeout
+	errw := cfg.ErrorWriter
+	if errw == nil {
+		errw = os.Stderr
 	}
 	program := cfg.Program
 	if program == "" {
 		program = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	}
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
+	queueSize := positive(cfg.QueueSize, defaultQueueSize)
+	notifyTimeout := positive(time.Duration(cfg.NotifyTimeout), defaultNotifyTimeout)
 
-	l := &Logger{program: program, closeTimeout: closeTimeout}
+	l := &Logger{
+		program:      program,
+		closeTimeout: positive(time.Duration(cfg.CloseTimeout), defaultCloseTimeout),
+	}
 	var handlers []slog.Handler
+	// addOutput makes a sink receive notifications, unless its config says no.
+	addOutput := func(on *bool, target Target, deliver func(delivery)) {
+		if notificationsOn(on) {
+			l.outputs = append(l.outputs, output{target, deliver})
+		}
+	}
 	fail := func(err error) (*Logger, error) {
 		_ = l.Close()
 		return nil, err
@@ -293,12 +306,9 @@ func New(cfg Config) (*Logger, error) {
 		if w == nil {
 			w = os.Stderr
 		}
-		color := !c.JSON && useColor(w, c.Color)
-		h := newWriterHandler(w, c.JSON, color, c.Level, cfg.Format, program)
+		h := newWriterHandler(w, c.JSON, !c.JSON && useColor(w, c.Color), c.Level, cfg.Format, program)
 		handlers = append(handlers, h)
-		if notificationsOn(c.Notifications) {
-			l.outputs = append(l.outputs, &output{target: ToConsole, deliver: messageWriter(h, c.JSON)})
-		}
+		addOutput(c.Notifications, ToConsole, noteWriter(h, c.JSON))
 	}
 
 	if c := cfg.File; c.Enabled {
@@ -309,28 +319,24 @@ func New(cfg Config) (*Logger, error) {
 		l.fileClose = closeFn
 		h := newWriterHandler(w, c.JSON, false, c.Level, cfg.Format, program)
 		handlers = append(handlers, h)
-		if notificationsOn(c.Notifications) {
-			l.outputs = append(l.outputs, &output{target: ToFile, deliver: messageWriter(h, c.JSON)})
-		}
+		addOutput(c.Notifications, ToFile, noteWriter(h, c.JSON))
 	}
 
-	// notifierSpec is the part of each notification sink's config that New
-	// needs, so the three sinks can be set up by one loop.
-	type notifierSpec struct {
-		enabled       bool
-		messagesOnly  bool
-		notifications *bool
-		level         slog.Level
+	// The three services differ only in these settings and in their sender.
+	services := []struct {
 		name          string
 		target        Target
+		enabled       bool
+		level         slog.Level
+		messagesOnly  bool
+		notifications *bool
 		build         func() (sender, error)
+	}{
+		{"telegram", ToTelegram, cfg.Telegram.Enabled, cfg.Telegram.Level, cfg.Telegram.MessagesOnly, cfg.Telegram.Notifications, cfg.Telegram.sender},
+		{"pushover", ToPushover, cfg.Pushover.Enabled, cfg.Pushover.Level, cfg.Pushover.MessagesOnly, cfg.Pushover.Notifications, cfg.Pushover.sender},
+		{"email", ToEmail, cfg.Email.Enabled, cfg.Email.Level, cfg.Email.MessagesOnly, cfg.Email.Notifications, cfg.Email.sender},
 	}
-	specs := []notifierSpec{
-		{cfg.Telegram.Enabled, cfg.Telegram.MessagesOnly, cfg.Telegram.Notifications, cfg.Telegram.Level, "telegram", ToTelegram, cfg.Telegram.sender},
-		{cfg.Pushover.Enabled, cfg.Pushover.MessagesOnly, cfg.Pushover.Notifications, cfg.Pushover.Level, "pushover", ToPushover, cfg.Pushover.sender},
-		{cfg.Email.Enabled, cfg.Email.MessagesOnly, cfg.Email.Notifications, cfg.Email.Level, "email", ToEmail, cfg.Email.sender},
-	}
-	for _, s := range specs {
+	for _, s := range services {
 		if !s.enabled {
 			continue
 		}
@@ -338,11 +344,9 @@ func New(cfg Config) (*Logger, error) {
 		if err != nil {
 			return fail(fmt.Errorf("rlog: %s: %w", s.name, err))
 		}
-		d := newDispatcher(s.name, snd, cfg.QueueSize, notifyTimeout, cfg.ErrorWriter)
+		d := newDispatcher(s.name, snd, queueSize, notifyTimeout, errw)
 		l.dispatchers = append(l.dispatchers, d)
-		if notificationsOn(s.notifications) {
-			l.outputs = append(l.outputs, &output{target: s.target, deliver: func(n notification, _ string) { d.enqueue(n) }})
-		}
+		addOutput(s.notifications, s.target, d.enqueue)
 		if !s.messagesOnly {
 			handlers = append(handlers, newNotifyHandler(d, s.level, cfg.Format, program))
 		}
@@ -350,11 +354,7 @@ func New(cfg Config) (*Logger, error) {
 
 	l.handler = fanout(handlers)
 	if cfg.Repeats.Enabled {
-		window := time.Duration(cfg.Repeats.Window)
-		if window <= 0 {
-			window = defaultRepeatWindow
-		}
-		l.repeats = newRepeatState(window)
+		l.repeats = newRepeatState(positive(time.Duration(cfg.Repeats.Window), defaultRepeatWindow))
 		l.handler = &repeatHandler{next: l.handler, st: l.repeats}
 	}
 	l.logger = slog.New(l.handler)
@@ -407,22 +407,22 @@ func (l *Logger) Handler() slog.Handler { return l.handler }
 // Slog returns a *slog.Logger using Handler.
 func (l *Logger) Slog() *slog.Logger { return l.logger }
 
-// Close flushes grouped repeats, waits up to Config.CloseTimeout for queued
-// notifications to be delivered, and closes the log file. It returns an
-// error if notifications were still pending when the timeout ran out.
+// Close flushes grouped repeats, waits up to Config.CloseTimeout for the
+// services' queues to empty, and closes the log file. It returns an error
+// if deliveries were still pending when the timeout ran out.
 //
 // Close is idempotent. Records logged after Close still reach the console
-// and file sinks; notifications are dropped.
+// and file sinks; nothing more is sent to the services.
 func (l *Logger) Close() error {
 	if l == nil {
 		return nil
 	}
 	l.closeOnce.Do(func() {
-		// Flush repeat summaries first so they still reach the notifiers.
+		// Flush repeat summaries first so they still reach the services.
 		if l.repeats != nil {
 			l.repeats.close()
 		}
-		// Drain all notifiers in parallel against one shared deadline.
+		// Drain all queues in parallel against one shared deadline.
 		deadline := time.Now().Add(l.closeTimeout)
 		errs := make([]error, len(l.dispatchers)+1)
 		var wg sync.WaitGroup

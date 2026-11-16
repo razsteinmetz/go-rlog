@@ -22,6 +22,7 @@ import (
 	rlog "github.com/razsteinmetz/go-rlog"
 )
 
+// main sets the logger up from rlog.yaml and runs each demonstration.
 func main() {
 	// 1. Put the secrets from .var into the environment, so that the
 	//    ${NAME} references in rlog.yaml pick them up.
@@ -43,7 +44,7 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	// Close sends whatever notifications are still queued.
+	// Close sends whatever is still queued for Telegram, Pushover and email.
 	defer func() {
 		if err := l.Close(); err != nil {
 			fmt.Println(err)
@@ -54,7 +55,7 @@ func main() {
 	logWithComponents()
 	logRepeats()
 	notificationBurst()
-	sendMessages(l)
+	sendNotifications(l)
 }
 
 // logRecords shows plain log calls at each level, with key/value pairs.
@@ -112,11 +113,12 @@ func notificationBurst() {
 	sensor.Info("burst over", "notifications", 200)
 }
 
-// sendMessages shows special messages: notifications that are not log
-// records. By default they go to every sink whose `notifications` setting
-// is not false (console and file show them as NOTE lines), regardless of
-// the sinks' levels. Message.To picks specific sinks instead.
-func sendMessages(l *rlog.Logger) {
+// sendNotifications shows notifications: messages without a level, as
+// opposed to log records. By default they go to every sink whose
+// `notifications` setting is not false (console and file show them as NOTE
+// lines), regardless of the sinks' levels. Message.To picks specific sinks
+// instead.
+func sendNotifications(l *rlog.Logger) {
 	// Formatted: the title is the program name, text "backup done files=1200".
 	l.Notify("backup done", "files", 1200, "took", "4m10s")
 

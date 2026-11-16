@@ -1,145 +1,244 @@
 # go-rlog
 
-A `log/slog` handler that sends records to several sinks. Programs log with plain `slog` calls, and rlog supplies the handler.
+rlog is a handler for Go's standard `log/slog` package, made for small programs such as home automation and IoT services. You log with plain `slog` calls; rlog writes each line to the console and a rotating file, and can send it to your phone or inbox.
 
-| Sink     | What it does |
+| Sink     | What it gets |
 |----------|--------------|
-| Console  | Text (optionally colored) or JSON, written to stderr (or any `io.Writer`) |
-| File     | Text or JSON, rotated by [lumberjack](https://github.com/natefinch/lumberjack) daily and at 100 MB by default; keeps N files, gzips old ones |
-| Telegram | Bot API `sendMessage` to one chat |
-| Pushover | Priority set per level (emergency priority supported) |
-| Email    | SMTP over STARTTLS, implicit TLS or plain, to one or more recipients |
+| Console  | Text (optionally colored) or JSON, on stderr |
+| File     | Text or JSON; rotated daily and at 100 MB, 7 old files kept, gzipped |
+| Telegram | A bot message to one chat |
+| Pushover | A push notification, with the priority chosen by level |
+| Email    | SMTP (STARTTLS, TLS or plain) to one or more recipients |
 
-Each sink has its own `Enabled` switch and minimum `Level`. Besides log records, rlog sends level-less **special messages** such as reports or "backup finished" notices, to every sink by default or to the ones you pick; each sink's `notifications` setting decides whether it accepts them.
+rlog carries two kinds of output:
 
-## Usage
+- **Log records** are ordinary `slog.Info`, `slog.Error` and so on. Each sink has a minimum `level`: by default the console and file take `info` and above, and Telegram, Pushover and email take only errors.
+- **Notifications** are messages without a level, sent with `rlog.Notify`. They are for things that are not errors but that you want to hear about: "backup finished", "garage door left open". By default they go to every sink.
+
+Telegram, Pushover and email are called the *services* below. They are sent in the background, so a slow or unreachable service never blocks your program.
+
+## Install
+
+```
+go get github.com/razsteinmetz/go-rlog@latest
+```
+
+Requires Go 1.25 or newer.
+
+## Quick start
+
+`rlog.yaml`:
+
+```yaml
+program: garage
+
+file:
+  enabled: true
+  path: logs/garage.log
+
+telegram:
+  enabled: true
+  token: ${TELEGRAM_TOKEN}      # taken from the environment
+  chat_id: ${TELEGRAM_CHAT_ID}
+```
+
+`main.go`:
 
 ```go
+package main
+
 import (
-    "log/slog"
-    rlog "github.com/razsteinmetz/go-rlog"
+	"log/slog"
+
+	rlog "github.com/razsteinmetz/go-rlog"
 )
 
 func main() {
-    l, err := rlog.InitFile("rlog.yaml") // or rlog.Init(cfg); both install it as slog.Default
-    if err != nil {
-        panic(err)
-    }
-    defer l.Close() // flushes grouped repeats and sends queued notifications (bounded by close_timeout)
+	l, err := rlog.InitFile("rlog.yaml") // read the config and make rlog slog's default
+	if err != nil {
+		panic(err)
+	}
+	defer l.Close() // send what is still queued, close the file
 
-    slog.Info("starting", "version", version)
-    log := rlog.Component("bridge") // = slog.Default().With("component", "bridge")
-    log.Error("connection lost", "host", host, "err", err)
+	slog.Info("started", "version", "1.2.0")
 
-    rlog.Notify("backup finished", "files", 1200, "took", took) // special message
+	door := rlog.Component("door") // a logger whose lines are marked [door]
+	door.Error("sensor failed", "pin", 4)
+
+	rlog.Notify("door left open", "minutes", 15)
 }
 ```
 
-Or in code:
+Console and file:
+
+```
+2026-11-16 10:04:05.123 INFO  garage: started version=1.2.0
+2026-11-16 10:04:05.124 ERROR garage: [door] sensor failed pin=4
+2026-11-16 10:04:05.124 NOTE  garage: door left open minutes=15
+```
+
+Telegram receives two messages. The error, because the sink's level is `error`:
+
+```
+garage ERROR
+[door] sensor failed pin=4
+```
+
+and the notification:
+
+```
+garage
+door left open minutes=15
+```
+
+The [`example`](example) folder has a complete program that exercises every feature; see [Example program](#example-program).
+
+## Log records
+
+Log with `slog` as usual. Values are given as key/value pairs after the message:
 
 ```go
-cfg := rlog.DefaultConfig()
-cfg.Program = "lutron"
-cfg.Format.Time = rlog.TimeShort
-cfg.Format.Source = rlog.SourceShort
-cfg.File.Enabled = true
-cfg.File.Path = "logs/lutron.log"
-cfg.Repeats.Enabled = true
-cfg.Telegram = rlog.TelegramSink{Enabled: true, Level: slog.LevelError,
-    Token: os.Getenv("TG_TOKEN"), ChatID: os.Getenv("TG_CHAT")}
-l, err := rlog.Init(cfg)
+slog.Warn("temperature high", "celsius", 31.5)
+slog.Error("read failed", "sensor", "attic", "err", err)
 ```
 
-Text output:
+A text line is `time LEVEL program: [component] message key=value ... (file.go:line)`. Each part can be turned off under `format` in the config, and `source` (the `file.go:line` part) is off by default.
 
+- **Levels.** `debug`, `info`, `warn` and `error`. A sink writes a record when the record's level is at or above the sink's `level`.
+- **Components.** `rlog.Component("door")` returns a logger that marks its lines with `[door]`. It is short for `slog.Default().With("component", "door")`, so call it after `InitFile`, not in a package-level `var`.
+- **The standard `log` package.** After `InitFile`, lines printed with `log.Print` (by your code or by a library) are captured too, at `info`.
+- **On the services**, a record's title is `garage ERROR` and its body is `[door] sensor failed pin=4`. Pushover's priority follows the level (`priorities` in the config).
+
+## Notifications
+
+```go
+rlog.Notify("backup finished", "files", 1200) // text "backup finished files=1200"; the title is the program name
+rlog.NotifyRaw("Server up", "All good.")      // title and text exactly as given; the title may be ""
+rlog.Send(rlog.Message{                       // full control
+	Title:    "Daily report",
+	Text:     "<b>3</b> errors today",
+	HTML:     true,                           // Telegram and Pushover HTML, text/html email
+	To:       rlog.ToTelegram | rlog.ToEmail, // only these sinks
+	Priority: 1,                              // Pushover priority, -2..2
+})
 ```
-2026-11-16 10:04:05.123 INFO  lutron: starting version=1.2.0 (main.go:24)
-2026-11-16 10:04:07.940 ERROR lutron: [bridge] connection lost host=10.0.0.5 err="i/o timeout" (bridge.go:88)
-```
 
-Telegram, Pushover and email use a short format: the title is `lutron ERROR` and the body is `[bridge] connection lost host=10.0.0.5 err="i/o timeout"`.
+These use the logger installed by `InitFile` or `Init`, and do nothing before that. The same three exist as methods on the `*rlog.Logger`.
 
-## Configuration file
+### Where a notification goes
 
-`LoadConfig(path)` / `InitFile(path)` read YAML, or JSON when the file ends in `.json`. The file is applied on top of `DefaultConfig()`, so only what differs needs to be given. Unknown keys are an error. Levels are strings (`debug`, `WARN`, `ERROR+4`), durations are strings (`30s`, `1m`). In any string value, `${NAME}` and `${NAME:-default}` are replaced from the environment, so secrets can stay out of the file.
+A notification ignores the sinks' `level`.
+
+- Without `To` (always the case for `Notify` and `NotifyRaw`) it goes to **every enabled sink**.
+- With `To` it goes only to the sinks named: `rlog.ToConsole`, `ToFile`, `ToTelegram`, `ToPushover`, `ToEmail`, combined with `|`.
+- A sink with `notifications: false` in the config never gets notifications, even when named in `To`.
+
+So each sink has two independent switches:
+
+| Sink setting | Log records | Notifications |
+|--------------|-------------|---------------|
+| (default) | at `level` and above | yes |
+| `notifications: false` | at `level` and above | no |
+| `messages_only: true` (services only) | no | yes |
+
+### What a notification looks like
+
+On the console and in the file it is one `NOTE` line. A title is written before the text (`Server up: All good.`), and line breaks become ` | `. In JSON output the level is `"NOTE"` and the title is a separate `title` key.
+
+On the services it depends on whether the notification is formatted (`Notify`, or `Send` without `Raw`) or raw (`NotifyRaw`, or `Send` with `Raw: true`):
+
+|               | Formatted | Raw |
+|---------------|-----------|-----|
+| Title         | the program name, or `program: Title` | `Title` exactly, or none |
+| Email subject | the title; when no `Title` was given and the text is not HTML, the first line of the text is added | `Title`, or the first line of the text |
+| Email body    | the text, then a line with the time and program | the text only |
+
+## Configuration
+
+`rlog.InitFile(path)` reads YAML, or JSON when the file name ends in `.json`.
+
+- The file is applied on top of the defaults, so it only needs the settings you change.
+- An unknown key is an error, which catches typos.
+- Levels are written `debug`, `info`, `warn`, `error` (or in between, like `ERROR+4`). Durations are written `30s`, `1m`, `500ms`.
+- In any text value, `${NAME}` is replaced by the environment variable `NAME`, and `${NAME:-fallback}` uses `fallback` when it is not set. This keeps tokens and passwords out of the file.
+
+Every key, with its default (the names, paths and addresses are examples):
 
 ```yaml
-program: lutron
+program: garage          # shown in log lines and titles; default: the executable's name
 
-format:
-  time: full          # full | datetime | short | time | timems | date | rfc3339 | rfc3339nano | iso8601 | unix | unixms | none | a Go layout
-  utc: false
-  source: short       # "" | short | full
-  level: true
-  component: true
-  program: true
+format:                  # how console and file lines look
+  time: full             # see "Time formats"
+  utc: false             # true: UTC instead of local time
+  source: ""             # "" (off) | short (main.go:42) | full (whole path)
+  level: true            # show INFO, ERROR, ...
+  component: true        # show [component]
+  program: true          # show the program name
 
 console:
   enabled: true
   level: info
-  json: false
-  color: auto         # never | auto | always
-  notifications: true # special messages appear as NOTE lines (default true)
+  json: false            # true: one JSON object per line
+  color: auto            # never | auto (only on a terminal) | always
+  notifications: true
 
 file:
-  enabled: true
+  enabled: false
   level: info
   json: false
-  path: logs/lutron.log
-  notifications: false # keep special messages out of the log file
-  max_size_mb: 100    # default 100
-  daily: true         # default true
-  max_backups: 7
-  max_age_days: 0
-  compress: true
+  notifications: true
+  path: logs/garage.log  # required when enabled; missing folders are created
+  max_size_mb: 100       # rotate at this size
+  daily: true            # also rotate at midnight
+  max_backups: 7         # rotated files to keep; 0 keeps all
+  max_age_days: 0        # delete rotated files older than this; 0 never
+  compress: true         # gzip rotated files
 
-repeats:              # group identical records/messages sent close together
-  enabled: true
+repeats:                 # see "Repeated messages"
+  enabled: false
   window: 1m
 
-queue_size: 100       # per notifier; extra notifications are dropped, never block
-notify_timeout: 15s   # bound on one delivery attempt
-close_timeout: 5s     # total wait in Close for queued notifications
+queue_size: 100          # per service; when full, new items are dropped
+notify_timeout: 15s      # limit on one send to a service
+close_timeout: 5s        # how long Close waits for the queues to empty
 
 telegram:
-  enabled: true
+  enabled: false
   level: error
-  token: ${TG_TOKEN}
-  chat_id: "-100123456"
+  notifications: true
+  messages_only: false
+  token: ${TELEGRAM_TOKEN}       # bot token from @BotFather
+  chat_id: ${TELEGRAM_CHAT_ID}   # user, group or channel id
 
 pushover:
-  enabled: true
-  level: warn
-  messages_only: false   # true: special messages only, no log records
-  notifications: true    # false: never send special messages here
-  token: ${PO_TOKEN}
-  user: ${PO_USER}
-  priorities: {WARN: 0, ERROR: 1, ERROR+4: 2}
+  enabled: false
+  level: error
+  notifications: true
+  messages_only: false
+  token: ${PUSHOVER_TOKEN}       # application token
+  user: ${PUSHOVER_USER}         # user or group key
+  device: ""                     # optional device name(s), comma separated
+  priorities: {DEBUG: -2, INFO: -1, WARN: 0, ERROR: 1}   # level: Pushover priority (-2..2)
 
 email:
-  enabled: true
+  enabled: false
   level: error
-  messages_only: true
+  notifications: true
+  messages_only: false
   host: smtp.gmail.com
-  security: starttls     # starttls | tls | none
-  username: bot@example.com
+  port: 0                        # 0: 587 for starttls, 465 for tls, 25 for none
+  security: starttls             # starttls | tls | none
+  username: ${SMTP_USERNAME}     # empty: no login
   password: ${SMTP_PASSWORD}
-  from: "Lutron <bot@example.com>"
+  from: "Garage <bot@example.com>"
   to: [me@example.com]
 ```
 
-## Format options (`Config.Format`)
+### Time formats
 
-| Field       | Meaning |
-|-------------|---------|
-| `Time`      | A preset or a Go layout (see below). Empty means `full` |
-| `UTC`       | Use UTC instead of local time (this also applies to daily rotation and backup names) |
-| `Source`    | `""` (off), `short` (`file.go:42`) or `full` (full path) |
-| `Level`     | Show the level |
-| `Component` | Show the `component` attribute as `[name]` (in JSON, keep or drop the key) |
-| `Program`   | Prefix lines with `Config.Program` (in JSON, add a `program` key) |
+`format.time` is one of these names, or any Go time layout such as `Jan _2 15:04`.
 
-| Time preset   | Example |
+| Name          | Example |
 |---------------|---------|
 | `full`        | `2026-11-16 10:04:05.123` |
 | `datetime`    | `2026-11-16 10:04:05` |
@@ -150,60 +249,68 @@ email:
 | `rfc3339`     | `2026-11-16T10:04:05+02:00` |
 | `rfc3339nano` | `2026-11-16T10:04:05.123456789+02:00` |
 | `iso8601`     | `2026-11-16T10:04:05.123+02:00` |
-| `unix`, `unixms` | `1794816245` (a number in JSON output) |
+| `unix`        | `1794816245` (a number in JSON output) |
+| `unixms`      | `1794816245123` (a number in JSON output) |
 | `none`        | no time |
 
-Console colors (`console.color`): `never`, `auto` (only on a terminal, and not when `NO_COLOR` is set or `TERM=dumb`) or `always`. On Windows, rlog switches the console into ANSI mode. JSON output is never colored.
+### Configuring in code
 
-## Special messages
-
-Special messages are not log records, so they ignore the sinks' `level`. Where they go:
-
-- `Message.To` empty (the default, and always for `Notify`/`NotifyRaw`): **every enabled sink** whose `notifications` setting is not `false` — console, file, Telegram, Pushover and email.
-- `Message.To` set (`rlog.ToConsole`, `ToFile`, `ToTelegram`, `ToPushover`, `ToEmail`, combined with `|`): only those sinks.
-- A sink with `notifications: false` never gets special messages, even when named in `To`. Leaving the key out means `true`.
-- A notification sink with `messages_only: true` gets only special messages, no log records.
-
-On the console and in the file a message is one `NOTE` line (newlines become ` | `):
-
-```
-2026-11-16 12:30:00.000 NOTE  lutron: backup finished files=1200
-2026-11-16 12:30:00.000 NOTE  lutron: Server up: All good.
-```
-
-In JSON output, `level` is `"NOTE"` and a title is a separate `title` key.
+The same settings are fields of `rlog.Config`:
 
 ```go
-l.Notify("backup finished", "files", 1200)   // formatted: title "lutron", text "backup finished files=1200"
-l.NotifyRaw("Server up", "All good.")         // sent exactly as given (title may be "")
-l.Send(rlog.Message{                          // full control
-    Title:    "Daily report",                 // formatted title: "lutron: Daily report"
-    Text:     "<b>3</b> errors today",
-    HTML:     true,                           // Telegram parse_mode=HTML, Pushover html=1, email text/html
-    To:       rlog.ToTelegram | rlog.ToEmail, // default: every sink that accepts notifications
-    Priority: 1,                              // Pushover only
-})
+cfg := rlog.DefaultConfig()
+cfg.Program = "garage"
+cfg.Format.Time = rlog.TimeShort
+cfg.File.Enabled = true
+cfg.File.Path = "logs/garage.log"
+cfg.Telegram.Enabled = true
+cfg.Telegram.Token = os.Getenv("TELEGRAM_TOKEN")
+cfg.Telegram.ChatID = os.Getenv("TELEGRAM_CHAT_ID")
+l, err := rlog.Init(cfg)
 ```
 
-`rlog.Notify`, `rlog.NotifyRaw` and `rlog.Send` do the same on the Logger installed by `Init` (and do nothing before it).
-
-Formatted messages are decorated like log notifications: the title is the program name (plus `: Title`), the email subject adds the first line of text, and emails end with the time and program. Raw messages get none of this.
+`rlog.LoadConfig(path)` returns the `Config` from a file so you can adjust it before `Init`. `rlog.New(cfg)` builds a logger without making it slog's default; log through `l.Slog()`.
 
 ## Repeated messages
 
-With `repeats.enabled`, the first occurrence of a record is logged at once; identical records (same level, message and attributes) within `window` are counted, and when the window ends the last one is logged once with `repeated=N`. A steady flood of one message produces one line per window on every sink, including notifications. Special messages are grouped the same way (`(repeated N more times)` is added to the text). `Close` flushes pending counts.
+With `repeats.enabled: true`, a message that repeats does not fill the log or your phone:
 
-## Failure handling
+- The first occurrence is written at once.
+- Identical records (same level, message and values) within `window` are only counted.
+- When the window ends, one line is written with `repeated=N`, and a new window starts.
 
-- Notifications are queued and sent on a background goroutine per notifier, so logging and `Notify` never wait on the network. When a queue fills (`queue_size`), new notifications are dropped.
-- Each delivery attempt is limited to `notify_timeout`; a failure (no network, bad key, server error) is reported and the notification dropped — there are no retries. A panic inside a sender is recovered.
-- rlog's own errors go to `Config.ErrorWriter` (stderr by default), never back into slog, at most one line per notifier per minute with a count of the errors suppressed in between. Telegram errors never include the bot token.
-- `Close` waits at most `close_timeout` in total (notifiers drain in parallel), then aborts what is in flight and returns an error saying how many notifications may have been dropped.
-- An invalid configuration (e.g. a Telegram sink without a token) is reported by `New`/`Init`; it never contacts the services, so a bad key only shows up as delivery errors later.
+A sensor that fails every second therefore produces one line and one alert per window. Notifications are grouped the same way; the summary's text ends with `(repeated N more times)`. `Close` writes any count still pending.
 
-## Notes
+Grouping applies to all sinks at once, including the console.
 
-- After `Close`, records still reach the console and file, but notifications are dropped.
-- lumberjack always rotates by size (`max_size_mb`, 100 MB when 0). `daily` adds a rotation at midnight. Backup files are named by when they were rotated, so the file closed at midnight carries the next day's date.
-- Pushover priority 2 (emergency) is sent with `retry=60` and `expire=3600`.
-- Telegram's HTML mode accepts only a few tags (`<b>`, `<i>`, `<u>`, `<s>`, `<a>`, `<code>`, `<pre>`, …). Texts longer than a service's limit are cut, which can break markup.
+## When a service fails
+
+- **Your program is never blocked.** Each service has its own queue and background sender. When a queue is full (`queue_size`), new items are dropped.
+- **No retries.** One send may take up to `notify_timeout`. If it fails (no network, wrong key, server error), the item is dropped and the error is reported.
+- **Errors go to stderr**, never back into the log, as lines starting with `rlog:`. Each service prints at most one error line per minute, with a count of the ones held back.
+- **A wrong key is only noticed when sending.** `InitFile` checks that the settings are complete and that the log file can be opened, but it does not contact the services.
+- **`Close` waits at most `close_timeout`**, then gives up and returns an error saying how much may have been dropped.
+
+## Good to know
+
+- Call `Close` before the program ends. `os.Exit` and `log.Fatal` skip deferred calls, so anything still queued for the services is lost.
+- After `Close`, records still reach the console and file; nothing more is sent to the services.
+- Daily rotation happens only while the program is running at midnight. A program that is started and stopped during the day rotates by size only.
+- A rotated file is named after the moment it was rotated, so the file closed at midnight carries the next day's date.
+- Email logs in with the PLAIN method. That works with Gmail (use an app password) and most providers, but not with Outlook or Office 365.
+- Every email opens its own connection, which takes a second or two. Raise `close_timeout` if the program sends several emails just before it exits.
+- Texts longer than a service allows are cut: 4096 characters on Telegram, 1024 on Pushover. With `HTML: true` the cut can break the markup. Telegram accepts only a few tags (`<b>`, `<i>`, `<u>`, `<s>`, `<a>`, `<code>`, `<pre>`).
+- Pushover priority 2 (emergency) repeats every 60 seconds for an hour until acknowledged.
+- A `Config` holds your tokens and passwords, so do not print or log it.
+
+## Example program
+
+The [`example`](example) folder shows records at every level, components, repeated messages, a burst of 200 identical notifications, and each kind of notification, using the config in `example/rlog.yaml`.
+
+```
+cd example
+copy .var.example .var     # cp on Linux and macOS
+go run .
+```
+
+Fill `.var` with the tokens and passwords for the services you want to try; git ignores that file. A service whose values are left empty is skipped, so you can test one at a time.

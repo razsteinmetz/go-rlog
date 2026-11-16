@@ -63,23 +63,24 @@ func LoadConfig(path string) (Config, error) {
 //	  enabled: true
 //	  token: ${TG_TOKEN}
 func ParseYAML(data []byte) (Config, error) {
-	cfg := DefaultConfig()
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
-		return Config{}, fmt.Errorf("rlog: parse yaml config: %w", err)
-	}
-	expandEnvFields(reflect.ValueOf(&cfg).Elem())
-	return cfg, nil
+	return parse("yaml", dec.Decode)
 }
 
 // ParseJSON is ParseYAML for JSON input.
 func ParseJSON(data []byte) (Config, error) {
-	cfg := DefaultConfig()
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
-		return Config{}, fmt.Errorf("rlog: parse json config: %w", err)
+	return parse("json", dec.Decode)
+}
+
+// parse runs decode on top of DefaultConfig and expands the environment
+// references. Empty input (io.EOF) yields the defaults.
+func parse(kind string, decode func(any) error) (Config, error) {
+	cfg := DefaultConfig()
+	if err := decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("rlog: parse %s config: %w", kind, err)
 	}
 	expandEnvFields(reflect.ValueOf(&cfg).Elem())
 	return cfg, nil

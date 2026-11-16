@@ -119,11 +119,11 @@ func (f Format) sourceOf(pc uintptr) string {
 // newWriterHandler builds the console/file handler: rlog's text format
 // (optionally colored), or slog's JSON handler with the same time, source
 // and field options.
-func newWriterHandler(w io.Writer, json, color bool, level slog.Leveler, f Format, program string) slog.Handler {
-	if json {
+func newWriterHandler(w io.Writer, asJSON, color bool, level slog.Leveler, f Format, program string) slog.Handler {
+	if asJSON {
 		return newJSONHandler(w, level, f, program)
 	}
-	lw := &lockedWriter{w: w}
+	var mu sync.Mutex // one whole line per write, so records never interleave
 	return &textHandler{
 		level:  level,
 		format: f,
@@ -131,14 +131,18 @@ func newWriterHandler(w io.Writer, json, color bool, level slog.Leveler, f Forma
 		color:  color,
 		prog:   program,
 		emit: func(_ slog.Level, _ time.Time, line string) error {
-			return lw.writeLine(line)
+			mu.Lock()
+			defer mu.Unlock()
+			_, err := io.WriteString(w, line+"\n")
+			return err
 		},
 	}
 }
 
 // newJSONHandler wraps slog.JSONHandler, rewriting the built-in time, level
 // and source attributes to follow f, and adding a "program" key when
-// f.Program is set.
+// f.Program is set. The type checks keep a user's own attribute that
+// happens to be called "time", "level" or "source" untouched.
 func newJSONHandler(w io.Writer, level slog.Leveler, f Format, program string) slog.Handler {
 	opts := &slog.HandlerOptions{
 		Level:     level,
@@ -149,20 +153,21 @@ func newJSONHandler(w io.Writer, level slog.Leveler, f Format, program string) s
 			}
 			switch a.Key {
 			case slog.TimeKey:
-				if a.Value.Kind() != slog.KindTime {
-					return a
+				if a.Value.Kind() == slog.KindTime {
+					return f.jsonTime(a.Value.Time())
 				}
-				return f.jsonTime(a.Value.Time())
 			case slog.LevelKey:
-				if !f.Level {
-					return slog.Attr{}
-				}
-				if l, ok := a.Value.Any().(slog.Level); ok && l == levelMessage {
-					return slog.String(slog.LevelKey, noteLabel)
+				if l, ok := a.Value.Any().(slog.Level); ok {
+					if !f.Level {
+						return slog.Attr{}
+					}
+					if l == levelNote {
+						return slog.String(slog.LevelKey, noteLabel)
+					}
 				}
 			case slog.SourceKey:
 				if src, ok := a.Value.Any().(*slog.Source); ok {
-					if src.File == "" { // no caller, e.g. a special message
+					if src.File == "" { // no caller, e.g. a notification
 						return slog.Attr{}
 					}
 					return slog.String(slog.SourceKey, f.formatSource(src.File, src.Line))
@@ -182,26 +187,11 @@ func newJSONHandler(w io.Writer, level slog.Leveler, f Format, program string) s
 	return h
 }
 
-// lockedWriter serializes whole-line writes so concurrent records never
-// interleave.
-type lockedWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-// writeLine writes s followed by a newline in one call.
-func (l *lockedWriter) writeLine(s string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, err := io.WriteString(l.w, s+"\n")
-	return err
-}
-
 // textHandler formats records as single lines:
 //
 //	2026-11-16 10:04:05.123 INFO  lutron: [bridge] connected host=10.0.0.5 (bridge.go:42)
 //
-// With full=false it produces the short notification body instead:
+// With full=false it produces the short body sent to the services instead:
 //
 //	[bridge] connected host=10.0.0.5
 //
@@ -296,10 +286,10 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 	return h.emit(r.Level, r.Time, string(buf))
 }
 
-// levelName is the level's text: "NOTE" for special messages, the slog
-// name (DEBUG, INFO, WARN, ERROR, ERROR+4, ...) otherwise.
+// levelName is the level's text: "NOTE" for notifications, the slog name
+// (DEBUG, INFO, WARN, ERROR, ERROR+4, ...) otherwise.
 func levelName(l slog.Level) string {
-	if l == levelMessage {
+	if l == levelNote {
 		return noteLabel
 	}
 	return l.String()
@@ -313,68 +303,42 @@ func appendAttr(buf []byte, prefix string, a slog.Attr, color bool) []byte {
 		return buf
 	}
 	if a.Value.Kind() == slog.KindGroup {
-		p := prefix
 		if a.Key != "" {
-			p += a.Key + "."
+			prefix += a.Key + "."
 		}
 		for _, ga := range a.Value.Group() {
-			buf = appendAttr(buf, p, ga, color)
+			buf = appendAttr(buf, prefix, ga, color)
 		}
 		return buf
 	}
-	buf = append(buf, ' ')
-	if color {
-		buf = append(buf, ansiDim...)
-	}
-	buf = appendText(buf, prefix+a.Key)
-	buf = append(buf, '=')
-	if color {
-		buf = append(buf, ansiReset...)
-	}
-	var s string
-	isErr := false
+	// Value.String formats like fmt.Sprint, so a value whose Error or
+	// String method panics (a nil pointer, say) cannot crash the logger.
+	s, isErr := a.Value.String(), false
 	switch a.Value.Kind() {
-	case slog.KindString:
-		s = a.Value.String()
 	case slog.KindTime:
 		s = a.Value.Time().Format(time.RFC3339Nano)
 	case slog.KindAny:
-		if err, ok := a.Value.Any().(error); ok {
-			s, isErr = err.Error(), true
-		} else {
-			s = fmt.Sprint(a.Value.Any())
-		}
-	default:
-		s = a.Value.String()
+		_, isErr = a.Value.Any().(error)
 	}
-	if color && isErr {
-		buf = append(buf, ansiRed...)
-		buf = appendText(buf, s)
-		return append(buf, ansiReset...)
-	}
-	return appendText(buf, s)
+	buf = append(buf, ' ')
+	buf = appendColored(buf, color, ansiDim, quoted(prefix+a.Key)+"=")
+	return appendColored(buf, color && isErr, ansiRed, quoted(s))
 }
 
-// appendText appends s, quoting it when it is empty or contains spaces,
-// quotes, '=' or unprintable characters.
-func appendText(buf []byte, s string) []byte {
-	if needsQuote(s) {
-		return strconv.AppendQuote(buf, s)
-	}
-	return append(buf, s...)
-}
-
-// needsQuote reports whether s must be quoted to keep key=value parseable.
-func needsQuote(s string) bool {
-	if s == "" {
-		return true
-	}
+// quoted returns s, in double quotes when it is empty or contains spaces,
+// quotes, '=' or unprintable characters, so key=value stays parseable.
+func quoted(s string) string {
+	quote := s == ""
 	for _, r := range s {
 		if r == '=' || r == '"' || r == utf8.RuneError || unicode.IsSpace(r) || !unicode.IsPrint(r) {
-			return true
+			quote = true
+			break
 		}
 	}
-	return false
+	if quote {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 // formatArgs renders msg followed by slog-style key/value args as
