@@ -1,5 +1,10 @@
 # go-rlog
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/razsteinmetz/go-rlog.svg)](https://pkg.go.dev/github.com/razsteinmetz/go-rlog)
+[![Go version](https://img.shields.io/github/go-mod/go-version/razsteinmetz/go-rlog)](go.mod)
+[![Version](https://img.shields.io/github/v/tag/razsteinmetz/go-rlog?sort=semver&label=version)](https://github.com/razsteinmetz/go-rlog/tags)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 rlog is a handler for Go's standard `log/slog` package, made for small programs such as home automation and IoT services. You log with plain `slog` calls; rlog writes each line to the console and a rotating file, and can send it to your phone or inbox.
 
 | Sink     | What it gets |
@@ -314,3 +319,7 @@ go run .
 ```
 
 Fill `.var` with the tokens and passwords for the services you want to try; git ignores that file. A service whose values are left empty is skipped, so you can test one at a time.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
