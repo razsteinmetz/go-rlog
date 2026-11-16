@@ -1,0 +1,19 @@
+# Copy this file to .var (which git ignores) and fill in the services you
+# want to test. Leave a service's values empty to skip it.
+# Format: KEY=VALUE, one per line; # starts a comment; quotes are optional.
+
+# Telegram: create a bot with @BotFather; get the chat id from @userinfobot
+# (or the "chat":{"id":...} of https://api.telegram.org/bot<TOKEN>/getUpdates).
+TELEGRAM_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Pushover: application token and your user key from https://pushover.net
+PUSHOVER_TOKEN=
+PUSHOVER_USER=
+
+# Email over SMTP. For Gmail use smtp.gmail.com and an app password.
+SMTP_HOST=
+SMTP_USERNAME=
+SMTP_PASSWORD=
+EMAIL_FROM="Home Bot <bot@example.com>"
+EMAIL_TO=

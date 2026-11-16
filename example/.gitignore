@@ -1,0 +1,4 @@
+# Secrets for the notification services; see .var.example.
+.var
+# Log files written by the example.
+logs/

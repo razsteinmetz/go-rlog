@@ -1,0 +1,70 @@
+# Example rlog configuration.
+#
+# Only settings that differ from rlog.DefaultConfig() are needed; everything
+# is spelled out here to show what is available.
+#
+# ${NAME} is replaced by the environment variable NAME. The example program
+# loads the secrets from .var (see .var.example) into the environment before
+# reading this file, so no secrets live in this file.
+
+program: example
+
+format:
+  time: full          # full | datetime | short | time | timems | date | rfc3339 | rfc3339nano | iso8601 | unix | unixms | none | a Go layout
+  utc: false
+  source: short       # "" (off) | short | full
+  level: true
+  component: true
+  program: true
+
+console:
+  enabled: true
+  level: debug
+  json: false
+  color: auto         # never | auto | always
+
+file:
+  enabled: true
+  level: info
+  json: true          # the file gets JSON lines, the console gets text
+  path: logs/example.log
+  max_size_mb: 100
+  daily: true
+  max_backups: 7
+  compress: true
+
+repeats:              # identical records within the window are grouped
+  enabled: true
+  window: 2s
+
+queue_size: 100
+notify_timeout: 15s
+close_timeout: 10s
+
+# Notification sinks. A sink whose secrets are missing from .var is turned
+# off by the example program, so you can test one service at a time.
+
+telegram:
+  enabled: true
+  level: error
+  token: ${TELEGRAM_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+
+pushover:
+  enabled: true
+  level: error
+  token: ${PUSHOVER_TOKEN}
+  user: ${PUSHOVER_USER}
+  priorities: {WARN: 0, ERROR: 1}
+
+email:
+  enabled: true
+  level: error
+  host: ${SMTP_HOST}
+  port: 587           # 587 starttls, 465 tls, 25 none
+  security: starttls  # starttls | tls | none
+  username: ${SMTP_USERNAME}
+  password: ${SMTP_PASSWORD}
+  from: ${EMAIL_FROM}
+  to:
+    - ${EMAIL_TO}
