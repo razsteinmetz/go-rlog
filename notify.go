@@ -13,22 +13,28 @@ import (
 	"unicode/utf8"
 )
 
-// Target selects notification sinks for a special message. Values can be
-// combined with |, e.g. ToTelegram|ToEmail.
+// Target selects the sinks a special message goes to. Values can be
+// combined with |, e.g. ToTelegram|ToFile.
 type Target uint8
 
-// Notification targets.
+// Message targets.
 const (
 	ToTelegram Target = 1 << iota // the Telegram sink
 	ToPushover                    // the Pushover sink
 	ToEmail                       // the email sink
-	ToAll      Target = 0         // every enabled notification sink
+	ToConsole                     // the console sink
+	ToFile                        // the file sink
+	ToAll      Target = 0         // every enabled sink that accepts notifications
 )
 
 // Message is a special, level-less notification: a report, a "started" or
-// "backup finished" notice, anything that is not a log record. It is sent
-// only to the notification sinks (Telegram, Pushover, email), regardless of
-// their Level, and is not written to the console or file.
+// "backup finished" notice, anything that is not a log record.
+//
+// It goes to the sinks selected by To (all of them when To is ToAll),
+// regardless of their Level, but only to sinks that are enabled and whose
+// Notifications setting is not false. That setting always wins: a sink with
+// notifications: false never receives messages, even when named in To.
+// On the console and in the file a message is written as one NOTE line.
 //
 // A formatted message (Raw false) is decorated like a log notification: the
 // title is "program" or "program: Title", and the email body ends with the
@@ -48,7 +54,8 @@ type Message struct {
 	// sent as text/html. Long texts are cut to each service's limit, which
 	// can break markup.
 	HTML bool
-	// To selects the sinks; ToAll (zero) means every enabled sink.
+	// To selects the sinks; ToAll (zero) means every sink that accepts
+	// notifications.
 	To Target
 	// Priority is the Pushover priority, -2..2 (0 is normal; 2 is an
 	// emergency that repeats every 60s for an hour until acknowledged).
@@ -56,11 +63,12 @@ type Message struct {
 	Priority int
 }
 
-// Send queues m for the selected notification sinks and returns at once;
-// it never waits on the network. Delivery errors go to Config.ErrorWriter.
-// Send does nothing on a nil Logger.
+// Send delivers m to the selected sinks and returns at once: console and
+// file lines are written immediately, and Telegram, Pushover and email are
+// queued, so Send never waits on the network. Delivery errors go to
+// Config.ErrorWriter. Send does nothing on a nil Logger.
 func (l *Logger) Send(m Message) {
-	if l == nil || len(l.notifiers) == 0 {
+	if l == nil || len(l.outputs) == 0 {
 		return
 	}
 	n := notification{
@@ -90,9 +98,9 @@ func (l *Logger) Send(m Message) {
 	}
 
 	emit := func(n notification) {
-		for _, nt := range l.notifiers {
-			if m.To == ToAll || m.To&nt.target != 0 {
-				nt.d.enqueue(n)
+		for _, o := range l.outputs {
+			if m.To == ToAll || m.To&o.target != 0 {
+				o.deliver(n, m.Title)
 			}
 		}
 	}
@@ -118,8 +126,8 @@ func (l *Logger) Notify(msg string, args ...any) {
 	l.Send(Message{Text: formatArgs(msg, args...)})
 }
 
-// NotifyRaw sends title and text to every enabled notification sink exactly
-// as given. title may be empty. See Message.
+// NotifyRaw sends title and text to every sink that accepts notifications,
+// exactly as given. title may be empty. See Message.
 func (l *Logger) NotifyRaw(title, text string) {
 	l.Send(Message{Title: title, Text: text, Raw: true})
 }
@@ -175,10 +183,45 @@ type sender interface {
 	send(ctx context.Context, n notification) error
 }
 
-// notifier is one enabled notification sink as seen by Logger.Send.
-type notifier struct {
-	target Target      // which ToXxx bit selects it
-	d      *dispatcher // its queue
+// output is one sink that accepts special messages, as seen by Logger.Send.
+type output struct {
+	target Target // which ToXxx bit selects it
+	// deliver writes or queues n. title is the caller's own Message.Title,
+	// which console and file lines use instead of the decorated n.Title.
+	deliver func(n notification, title string)
+}
+
+// notificationsOn reports whether a sink's Notifications setting lets
+// special messages through: unset (nil) means yes.
+func notificationsOn(p *bool) bool { return p == nil || *p }
+
+// levelMessage is the pseudo-level of the records that carry special
+// messages to the console and file. It is printed as "NOTE". Those records
+// are handed straight to the sink's handler, so the value never meets a
+// level filter.
+const levelMessage slog.Level = 1 << 30
+
+// noteLabel is how levelMessage is printed.
+const noteLabel = "NOTE"
+
+// messageWriter returns an output deliver function that writes a special
+// message to a console or file handler as one record at levelMessage.
+// Newlines in the text are replaced so the message stays on one line. In
+// text output the caller's title prefixes the message ("Title: text"); in
+// JSON output it is a separate "title" key.
+func messageWriter(h slog.Handler, json bool) func(notification, string) {
+	return func(n notification, title string) {
+		text := strings.NewReplacer("\r\n", " | ", "\n", " | ", "\r", " | ").Replace(n.Text)
+		msg := text
+		if title != "" && !json {
+			msg = title + ": " + text
+		}
+		r := slog.NewRecord(n.Time, levelMessage, msg, 0)
+		if title != "" && json {
+			r.AddAttrs(slog.String("title", title))
+		}
+		_ = h.Handle(context.Background(), r)
+	}
 }
 
 // dispatcher sends notifications from a queue on its own goroutine so that

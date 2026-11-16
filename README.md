@@ -10,7 +10,7 @@ A `log/slog` handler that sends records to several sinks. Programs log with plai
 | Pushover | Priority set per level (emergency priority supported) |
 | Email    | SMTP over STARTTLS, implicit TLS or plain, to one or more recipients |
 
-Each sink has its own `Enabled` switch and minimum `Level`. The notification sinks (Telegram, Pushover, email) can also be sent level-less **special messages** such as reports or "backup finished" notices.
+Each sink has its own `Enabled` switch and minimum `Level`. Besides log records, rlog sends level-less **special messages** such as reports or "backup finished" notices, to every sink by default or to the ones you pick; each sink's `notifications` setting decides whether it accepts them.
 
 ## Usage
 
@@ -79,12 +79,14 @@ console:
   level: info
   json: false
   color: auto         # never | auto | always
+  notifications: true # special messages appear as NOTE lines (default true)
 
 file:
   enabled: true
   level: info
   json: false
   path: logs/lutron.log
+  notifications: false # keep special messages out of the log file
   max_size_mb: 100    # default 100
   daily: true         # default true
   max_backups: 7
@@ -109,6 +111,7 @@ pushover:
   enabled: true
   level: warn
   messages_only: false   # true: special messages only, no log records
+  notifications: true    # false: never send special messages here
   token: ${PO_TOKEN}
   user: ${PO_USER}
   priorities: {WARN: 0, ERROR: 1, ERROR+4: 2}
@@ -154,7 +157,21 @@ Console colors (`console.color`): `never`, `auto` (only on a terminal, and not w
 
 ## Special messages
 
-Special messages go to the notification sinks only, regardless of their `level`, and are not written to the console or file. A sink with `messages_only: true` receives only these.
+Special messages are not log records, so they ignore the sinks' `level`. Where they go:
+
+- `Message.To` empty (the default, and always for `Notify`/`NotifyRaw`): **every enabled sink** whose `notifications` setting is not `false` — console, file, Telegram, Pushover and email.
+- `Message.To` set (`rlog.ToConsole`, `ToFile`, `ToTelegram`, `ToPushover`, `ToEmail`, combined with `|`): only those sinks.
+- A sink with `notifications: false` never gets special messages, even when named in `To`. Leaving the key out means `true`.
+- A notification sink with `messages_only: true` gets only special messages, no log records.
+
+On the console and in the file a message is one `NOTE` line (newlines become ` | `):
+
+```
+2026-11-16 12:30:00.000 NOTE  lutron: backup finished files=1200
+2026-11-16 12:30:00.000 NOTE  lutron: Server up: All good.
+```
+
+In JSON output, `level` is `"NOTE"` and a title is a separate `title` key.
 
 ```go
 l.Notify("backup finished", "files", 1200)   // formatted: title "lutron", text "backup finished files=1200"
@@ -163,7 +180,7 @@ l.Send(rlog.Message{                          // full control
     Title:    "Daily report",                 // formatted title: "lutron: Daily report"
     Text:     "<b>3</b> errors today",
     HTML:     true,                           // Telegram parse_mode=HTML, Pushover html=1, email text/html
-    To:       rlog.ToTelegram | rlog.ToEmail, // default: all enabled notifiers
+    To:       rlog.ToTelegram | rlog.ToEmail, // default: every sink that accepts notifications
     Priority: 1,                              // Pushover only
 })
 ```

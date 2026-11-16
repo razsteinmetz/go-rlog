@@ -21,6 +21,9 @@ type PushoverSink struct {
 	Level slog.Level `json:"level" yaml:"level"`
 	// MessagesOnly sends only special messages, no log records.
 	MessagesOnly bool `json:"messages_only" yaml:"messages_only"`
+	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Send) are sent here. Nil (not set) means yes.
+	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Token is the application API token.
 	Token string `json:"token" yaml:"token"`
 	// User is the user or group key.

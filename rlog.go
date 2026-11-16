@@ -19,8 +19,10 @@
 // LoadConfig, or in one step with InitFile.
 //
 // Each sink has its own Enabled switch and minimum Level. Besides log
-// records, the notification sinks (Telegram, Pushover, email) can be sent
-// level-less "special" messages with Notify, NotifyRaw and Send.
+// records, level-less "special" messages can be sent with Notify, NotifyRaw
+// and Send: to every sink by default (console and file show them as NOTE
+// lines), or to the sinks named in Message.To. A sink's Notifications
+// setting decides whether it accepts them.
 //
 // Notifications are queued and delivered on background goroutines, so a slow
 // or unreachable notification service never blocks the caller, and Close
@@ -92,6 +94,9 @@ type ConsoleSink struct {
 	Level slog.Level `json:"level" yaml:"level"`
 	// JSON writes one JSON object per record instead of a text line.
 	JSON bool `json:"json" yaml:"json"`
+	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Send) are written here, as NOTE lines. Nil (not set) means yes.
+	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Color colors text output with ANSI escapes: "never" (or empty),
 	// "auto" (only when writing to a terminal and NO_COLOR is unset) or
 	// "always". It is ignored for JSON output.
@@ -108,6 +113,9 @@ type FileSink struct {
 	Level slog.Level `json:"level" yaml:"level"`
 	// JSON writes one JSON object per record instead of a text line.
 	JSON bool `json:"json" yaml:"json"`
+	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Send) are written here, as NOTE lines. Nil (not set) means yes.
+	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Path is the log file. Missing directories are created.
 	Path string `json:"path" yaml:"path"`
 	// MaxSizeMB rotates when the file reaches this size. 0 means 100 MB;
@@ -231,7 +239,8 @@ type Logger struct {
 	handler      slog.Handler  // fan-out (optionally wrapped by repeat grouping)
 	logger       *slog.Logger  // slog.New(handler)
 	program      string        // resolved Config.Program
-	notifiers    []*notifier   // enabled notification sinks, for Send
+	outputs      []*output     // sinks that accept special messages, for Send
+	dispatchers  []*dispatcher // notification queues, drained by Close
 	repeats      *repeatState  // nil when Config.Repeats is off
 	closeTimeout time.Duration // total wait for queued notifications in Close
 	fileClose    func() error  // closes the log file; nil without a file sink
@@ -285,7 +294,11 @@ func New(cfg Config) (*Logger, error) {
 			w = os.Stderr
 		}
 		color := !c.JSON && useColor(w, c.Color)
-		handlers = append(handlers, newWriterHandler(w, c.JSON, color, c.Level, cfg.Format, program))
+		h := newWriterHandler(w, c.JSON, color, c.Level, cfg.Format, program)
+		handlers = append(handlers, h)
+		if notificationsOn(c.Notifications) {
+			l.outputs = append(l.outputs, &output{target: ToConsole, deliver: messageWriter(h, c.JSON)})
+		}
 	}
 
 	if c := cfg.File; c.Enabled {
@@ -294,23 +307,28 @@ func New(cfg Config) (*Logger, error) {
 			return fail(err)
 		}
 		l.fileClose = closeFn
-		handlers = append(handlers, newWriterHandler(w, c.JSON, false, c.Level, cfg.Format, program))
+		h := newWriterHandler(w, c.JSON, false, c.Level, cfg.Format, program)
+		handlers = append(handlers, h)
+		if notificationsOn(c.Notifications) {
+			l.outputs = append(l.outputs, &output{target: ToFile, deliver: messageWriter(h, c.JSON)})
+		}
 	}
 
 	// notifierSpec is the part of each notification sink's config that New
 	// needs, so the three sinks can be set up by one loop.
 	type notifierSpec struct {
-		enabled      bool
-		messagesOnly bool
-		level        slog.Level
-		name         string
-		target       Target
-		build        func() (sender, error)
+		enabled       bool
+		messagesOnly  bool
+		notifications *bool
+		level         slog.Level
+		name          string
+		target        Target
+		build         func() (sender, error)
 	}
 	specs := []notifierSpec{
-		{cfg.Telegram.Enabled, cfg.Telegram.MessagesOnly, cfg.Telegram.Level, "telegram", ToTelegram, cfg.Telegram.sender},
-		{cfg.Pushover.Enabled, cfg.Pushover.MessagesOnly, cfg.Pushover.Level, "pushover", ToPushover, cfg.Pushover.sender},
-		{cfg.Email.Enabled, cfg.Email.MessagesOnly, cfg.Email.Level, "email", ToEmail, cfg.Email.sender},
+		{cfg.Telegram.Enabled, cfg.Telegram.MessagesOnly, cfg.Telegram.Notifications, cfg.Telegram.Level, "telegram", ToTelegram, cfg.Telegram.sender},
+		{cfg.Pushover.Enabled, cfg.Pushover.MessagesOnly, cfg.Pushover.Notifications, cfg.Pushover.Level, "pushover", ToPushover, cfg.Pushover.sender},
+		{cfg.Email.Enabled, cfg.Email.MessagesOnly, cfg.Email.Notifications, cfg.Email.Level, "email", ToEmail, cfg.Email.sender},
 	}
 	for _, s := range specs {
 		if !s.enabled {
@@ -321,7 +339,10 @@ func New(cfg Config) (*Logger, error) {
 			return fail(fmt.Errorf("rlog: %s: %w", s.name, err))
 		}
 		d := newDispatcher(s.name, snd, cfg.QueueSize, notifyTimeout, cfg.ErrorWriter)
-		l.notifiers = append(l.notifiers, &notifier{target: s.target, d: d})
+		l.dispatchers = append(l.dispatchers, d)
+		if notificationsOn(s.notifications) {
+			l.outputs = append(l.outputs, &output{target: s.target, deliver: func(n notification, _ string) { d.enqueue(n) }})
+		}
 		if !s.messagesOnly {
 			handlers = append(handlers, newNotifyHandler(d, s.level, cfg.Format, program))
 		}
@@ -403,10 +424,10 @@ func (l *Logger) Close() error {
 		}
 		// Drain all notifiers in parallel against one shared deadline.
 		deadline := time.Now().Add(l.closeTimeout)
-		errs := make([]error, len(l.notifiers)+1)
+		errs := make([]error, len(l.dispatchers)+1)
 		var wg sync.WaitGroup
-		for i, n := range l.notifiers {
-			wg.Go(func() { errs[i] = n.d.close(deadline) })
+		for i, d := range l.dispatchers {
+			wg.Go(func() { errs[i] = d.close(deadline) })
 		}
 		wg.Wait()
 		if l.fileClose != nil {

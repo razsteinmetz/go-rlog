@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -602,11 +603,10 @@ func TestEmailMessageFormats(t *testing.T) {
 	s := &emailSender{cfg: EmailSink{From: "a@example.com", To: []string{"b@example.com"}}}
 	l := &Logger{program: "prog"}
 	build := func(m Message) string {
-		var got notification
-		l.notifiers = []*notifier{{d: &dispatcher{ch: make(chan notification, 1)}}}
+		ch := make(chan notification, 1)
+		l.outputs = []*output{{target: ToEmail, deliver: func(n notification, _ string) { ch <- n }}}
 		l.Send(m)
-		got = <-l.notifiers[0].d.ch
-		return string(s.message(got))
+		return string(s.message(<-ch))
 	}
 	cases := []struct {
 		m       Message
@@ -707,5 +707,89 @@ func TestProgramDefaultsToExecutable(t *testing.T) {
 	exe := strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	if want := "INFO  " + exe + ": x\n"; buf.String() != want {
 		t.Fatalf("got %q want %q", buf.String(), want)
+	}
+}
+
+// TestMessageOutputs checks where special messages go: by default to every
+// sink including console and file (as NOTE lines), only to the sinks named
+// in To when given, and never to a sink with notifications: false.
+func TestMessageOutputs(t *testing.T) {
+	var tg, po capture
+	tgs := tg.server(t, `{"ok":true}`)
+	pos := po.server(t, `{"status":1}`)
+	path := filepath.Join(t.TempDir(), "app.log")
+	off := false
+	var errBuf bytes.Buffer
+	_, buf, l := newBuf(t, func(c *Config) {
+		c.ErrorWriter = &errBuf
+		c.Format.Time = TimeNone
+		c.Format.Source = SourceShort // messages must still get no source
+		c.File = FileSink{Enabled: true, Level: slog.LevelError, Path: path, JSON: true}
+		c.Telegram = TelegramSink{Enabled: true, Level: slog.LevelError, Token: "T", ChatID: "1", APIURL: tgs.URL}
+		c.Pushover = PushoverSink{Enabled: true, Level: slog.LevelError, Token: "A", User: "U", APIURL: pos.URL,
+			Notifications: &off}
+	})
+	l.Notify("all", "n", 1)                                                    // console, file, telegram (not pushover: off)
+	l.NotifyRaw("Title", "line1\nline2")                                       // same sinks
+	l.Send(Message{Text: "console only", To: ToConsole})                       // console only
+	l.Send(Message{Text: "file+po", To: ToFile | ToPushover})                  // file only: pushover is off
+	l.Send(Message{Title: "T", Text: "<b>tg</b>", HTML: true, To: ToTelegram}) // telegram only
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if errBuf.Len() > 0 {
+		t.Fatal(errBuf.String())
+	}
+
+	wantConsole := "NOTE  prog: all n=1\nNOTE  prog: Title: line1 | line2\nNOTE  prog: console only\n"
+	if buf.String() != wantConsole {
+		t.Fatalf("console got %q want %q", buf.String(), wantConsole)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatal(err, line)
+		}
+		if _, has := m["source"]; has {
+			t.Fatalf("message has a source: %v", m)
+		}
+		if m["level"] != "NOTE" {
+			t.Fatalf("file level %v", m)
+		}
+		msgs = append(msgs, fmt.Sprint(m["msg"], "|", m["title"]))
+	}
+	wantFile := []string{"all n=1|<nil>", "line1 | line2|Title", "file+po|<nil>"}
+	if strings.Join(msgs, ";") != strings.Join(wantFile, ";") {
+		t.Fatalf("file got %q want %q", msgs, wantFile)
+	}
+
+	tg.mu.Lock()
+	defer tg.mu.Unlock()
+	if len(tg.forms) != 3 {
+		t.Fatalf("telegram got %d messages: %v", len(tg.forms), tg.forms)
+	}
+	po.mu.Lock()
+	defer po.mu.Unlock()
+	if len(po.forms) != 0 {
+		t.Fatalf("pushover should get nothing, got %v", po.forms)
+	}
+}
+
+// TestNotificationsYAML checks that notifications: false is read from YAML
+// and that an absent key leaves the setting unset (meaning yes).
+func TestNotificationsYAML(t *testing.T) {
+	cfg, err := ParseYAML([]byte("file:\n  notifications: false\nconsole:\n  notifications: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notificationsOn(cfg.File.Notifications) || !notificationsOn(cfg.Console.Notifications) ||
+		!notificationsOn(cfg.Telegram.Notifications) {
+		t.Fatalf("%v %v %v", cfg.File.Notifications, cfg.Console.Notifications, cfg.Telegram.Notifications)
 	}
 }

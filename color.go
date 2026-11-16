@@ -25,14 +25,18 @@ const (
 	ansiGreen   = "\x1b[32m"
 	ansiYellow  = "\x1b[33m"
 	ansiBlue    = "\x1b[34m"
+	ansiMagenta = "\x1b[35m"
 	ansiCyan    = "\x1b[36m"
 	ansiBoldRed = "\x1b[1;31m"
 )
 
 // levelColor returns the escape for a level: blue DEBUG, green INFO,
-// yellow WARN, red ERROR and bold red above ERROR.
+// yellow WARN, red ERROR, bold red above ERROR and magenta for NOTE
+// (special messages).
 func levelColor(l slog.Level) string {
 	switch {
+	case l == levelMessage:
+		return ansiMagenta
 	case l > slog.LevelError:
 		return ansiBoldRed
 	case l >= slog.LevelError:

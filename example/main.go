@@ -53,6 +53,7 @@ func main() {
 	logRecords()
 	logWithComponents()
 	logRepeats()
+	notificationBurst()
 	sendMessages(l)
 }
 
@@ -92,9 +93,29 @@ func logRepeats() {
 	}
 }
 
+// notificationBurst simulates a chatty motion sensor: the same notification
+// 200 times over about 3 seconds, with other, changing log records mixed
+// in. With repeats enabled (window 2s in rlog.yaml), the 200 notifications
+// produce only a few lines and phone/email alerts: the first one at once,
+// then one "(repeated N more times)" summary per window, the last one when
+// Close runs. The sensor readings in between differ from each other, so
+// each of them is still logged.
+func notificationBurst() {
+	sensor := rlog.Component("sensor")
+	for i := range 200 {
+		rlog.Notify("motion detected", "where", "front door")
+		if i%25 == 0 {
+			sensor.Info("reading", "temp", 20.0+float64(i)/100, "humidity", 40+i/25)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	sensor.Info("burst over", "notifications", 200)
+}
+
 // sendMessages shows special messages: notifications that are not log
-// records. They go only to Telegram, Pushover and email, regardless of
-// those sinks' levels, and are not written to the console or file.
+// records. By default they go to every sink whose `notifications` setting
+// is not false (console and file show them as NOTE lines), regardless of
+// the sinks' levels. Message.To picks specific sinks instead.
 func sendMessages(l *rlog.Logger) {
 	// Formatted: the title is the program name, text "backup done files=1200".
 	l.Notify("backup done", "files", 1200, "took", "4m10s")
@@ -113,6 +134,12 @@ func sendMessages(l *rlog.Logger) {
 		Text:     "Water leak in the basement!",
 		To:       rlog.ToPushover,
 		Priority: 1, // high priority
+	})
+
+	// Only into the console and the log file, no phone or email.
+	l.Send(rlog.Message{
+		Text: "nightly cleanup removed 42 files",
+		To:   rlog.ToConsole | rlog.ToFile,
 	})
 
 	// After Init, the package-level helpers do the same without l.

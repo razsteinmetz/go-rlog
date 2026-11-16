@@ -33,6 +33,9 @@ type EmailSink struct {
 	Level slog.Level `json:"level" yaml:"level"`
 	// MessagesOnly sends only special messages, no log records.
 	MessagesOnly bool `json:"messages_only" yaml:"messages_only"`
+	// Notifications controls whether special messages (Notify, NotifyRaw,
+	// Send) are sent here. Nil (not set) means yes.
+	Notifications *bool `json:"notifications" yaml:"notifications"`
 	// Host is the SMTP server name; it is also checked against the TLS
 	// certificate.
 	Host string `json:"host" yaml:"host"`

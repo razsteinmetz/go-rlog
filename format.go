@@ -157,8 +157,14 @@ func newJSONHandler(w io.Writer, level slog.Leveler, f Format, program string) s
 				if !f.Level {
 					return slog.Attr{}
 				}
+				if l, ok := a.Value.Any().(slog.Level); ok && l == levelMessage {
+					return slog.String(slog.LevelKey, noteLabel)
+				}
 			case slog.SourceKey:
 				if src, ok := a.Value.Any().(*slog.Source); ok {
+					if src.File == "" { // no caller, e.g. a special message
+						return slog.Attr{}
+					}
 					return slog.String(slog.SourceKey, f.formatSource(src.File, src.Line))
 				}
 			case ComponentKey:
@@ -268,7 +274,7 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 			buf = append(buf, ' ')
 		}
 		if f.Level {
-			buf = appendColored(buf, color, levelColor(r.Level), fmt.Sprintf("%-5s", r.Level.String()))
+			buf = appendColored(buf, color, levelColor(r.Level), fmt.Sprintf("%-5s", levelName(r.Level)))
 			buf = append(buf, ' ')
 		}
 		if f.Program && h.prog != "" {
@@ -288,6 +294,15 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 		buf = appendColored(buf, color, ansiDim, "("+src+")")
 	}
 	return h.emit(r.Level, r.Time, string(buf))
+}
+
+// levelName is the level's text: "NOTE" for special messages, the slog
+// name (DEBUG, INFO, WARN, ERROR, ERROR+4, ...) otherwise.
+func levelName(l slog.Level) string {
+	if l == levelMessage {
+		return noteLabel
+	}
+	return l.String()
 }
 
 // appendAttr appends " key=value", flattening groups into dotted keys.
