@@ -2,10 +2,9 @@ module github.com/razsteinmetz/go-rlog
 
 go 1.25
 
-require (
-	go.yaml.in/yaml/v3 v3.0.5
-	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-)
+require gopkg.in/natefinch/lumberjack.v2 v2.2.1
+
+require go.yaml.in/yaml/v4 v4.0.0
 
 // Early releases with bugs fixed in v0.3.1 (a crash on nil error values,
 // silently lost logs on a bad file path, out-of-order repeat summaries),

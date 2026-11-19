@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Duration is a time.Duration that is written in YAML and JSON as a string
@@ -63,9 +63,14 @@ func LoadConfig(path string) (Config, error) {
 //	  enabled: true
 //	  token: ${TG_TOKEN}
 func ParseYAML(data []byte) (Config, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	return parse("yaml", dec.Decode)
+	// WithKnownFields: unknown keys are an error. A Loader (unlike
+	// yaml.Load) returns io.EOF for an empty file, which parse turns into
+	// the defaults.
+	l, err := yaml.NewLoader(bytes.NewReader(data), yaml.WithKnownFields())
+	if err != nil {
+		return Config{}, fmt.Errorf("rlog: parse yaml config: %w", err)
+	}
+	return parse("yaml", l.Load)
 }
 
 // ParseJSON is ParseYAML for JSON input.
